@@ -9,7 +9,10 @@ import torch
 from torch.utils.data import TensorDataset, DataLoader, WeightedRandomSampler
 import torch.nn as nn
 import torch.nn.functional as F
-from sklearn.metrics import precision_score, recall_score, f1_score, accuracy_score, classification_report, confusion_matrix, roc_auc_score, roc_curve
+from sklearn.metrics import (precision_score, recall_score, f1_score, accuracy_score, 
+                             classification_report, confusion_matrix, roc_auc_score, roc_curve,
+                             average_precision_score, matthews_corrcoef, brier_score_loss,
+                             precision_recall_curve)
 import numpy as np
 import matplotlib.pyplot as plt
 import seaborn as sns
@@ -20,8 +23,8 @@ from collections import Counter
 ##########################data preparation##########################
 
 # Load datasets
-landslides = pd.read_csv("output_landslides.csv")
-nonLandslides = pd.read_csv("output_non_landslides.csv")
+landslides = pd.read_csv("../output_landslides.csv")
+nonLandslides = pd.read_csv("../output_non_landslides.csv")
 
 # Add label
 landslides["label"] = 1
@@ -245,7 +248,16 @@ print("Performing 5-fold spatial CV to assess model robustness...")
 
 # Use GroupKFold for spatial CV on training data
 gkf = GroupKFold(n_splits=5)
-kfold_scores = {'accuracy': [], 'precision': [], 'recall': [], 'f1': [], 'auc': []}
+kfold_scores = {
+    'accuracy': [], 
+    'precision': [], 
+    'recall': [], 
+    'f1': [], 
+    'auroc': [], 
+    'pr_auc': [],
+    'mcc': [],
+    'brier': []
+}
 
 # Get blocks for training data only
 train_blocks = block_ids_spatial[train_idx]
@@ -270,7 +282,6 @@ for cv_train_idx, cv_val_idx in gkf.split(X_train, y_train, groups=train_blocks)
     
     # Quick model training for CV (simpler model for speed)
     from sklearn.ensemble import RandomForestClassifier
-    from sklearn.metrics import accuracy_score, precision_score, recall_score, f1_score, roc_auc_score
     
     cv_model = RandomForestClassifier(n_estimators=100, random_state=42, n_jobs=-1, class_weight='balanced')
     cv_model.fit(X_cv_train_scaled, y_cv_train)
@@ -279,30 +290,54 @@ for cv_train_idx, cv_val_idx in gkf.split(X_train, y_train, groups=train_blocks)
     y_cv_pred = cv_model.predict(X_cv_val_scaled)
     y_cv_prob = cv_model.predict_proba(X_cv_val_scaled)[:, 1]
     
-    # Calculate metrics
+    # Calculate all metrics
     fold_acc = accuracy_score(y_cv_val, y_cv_pred)
     fold_prec = precision_score(y_cv_val, y_cv_pred, zero_division=0)
     fold_rec = recall_score(y_cv_val, y_cv_pred, zero_division=0)
     fold_f1 = f1_score(y_cv_val, y_cv_pred, zero_division=0)
-    fold_auc = roc_auc_score(y_cv_val, y_cv_prob) if len(np.unique(y_cv_val)) > 1 else 0
+    
+    # Check if both classes present in validation fold
+    if len(np.unique(y_cv_val)) > 1:
+        fold_auroc = roc_auc_score(y_cv_val, y_cv_prob)
+        fold_pr_auc = average_precision_score(y_cv_val, y_cv_prob)
+        fold_mcc = matthews_corrcoef(y_cv_val, y_cv_pred)
+        fold_brier = brier_score_loss(y_cv_val, y_cv_prob)
+    else:
+        fold_auroc = fold_pr_auc = fold_mcc = fold_brier = 0
+        print(f"  Warning: Only one class in validation fold, some metrics set to 0")
     
     kfold_scores['accuracy'].append(fold_acc)
     kfold_scores['precision'].append(fold_prec)
     kfold_scores['recall'].append(fold_rec)
     kfold_scores['f1'].append(fold_f1)
-    kfold_scores['auc'].append(fold_auc)
+    kfold_scores['auroc'].append(fold_auroc)
+    kfold_scores['pr_auc'].append(fold_pr_auc)
+    kfold_scores['mcc'].append(fold_mcc)
+    kfold_scores['brier'].append(fold_brier)
     
-    print(f"  Metrics: Acc={fold_acc:.3f}, Prec={fold_prec:.3f}, Rec={fold_rec:.3f}, F1={fold_f1:.3f}, AUC={fold_auc:.3f}")
+    print(f"  Accuracy={fold_acc:.3f}, Precision={fold_prec:.3f}, Recall={fold_rec:.3f}, F1={fold_f1:.3f}")
+    print(f"  AUROC={fold_auroc:.3f}, PR-AUC={fold_pr_auc:.3f}, MCC={fold_mcc:.3f}, Brier={fold_brier:.3f}")
 
 # Print CV summary
 print(f"\n=== SPATIAL CV SUMMARY (5-fold) ===")
+print(f"{'Metric':<15} {'Mean':<10} {'Std':<10} {'Min':<10} {'Max':<10}")
+print(f"{'-'*55}")
 for metric, scores in kfold_scores.items():
     mean_score = np.mean(scores)
     std_score = np.std(scores)
-    print(f"{metric.upper()}: {mean_score:.3f} ± {std_score:.3f}")
+    min_score = np.min(scores)
+    max_score = np.max(scores)
+    print(f"{metric.upper():<15} {mean_score:.4f}    {std_score:.4f}    {min_score:.4f}    {max_score:.4f}")
 
 print(f"\nNote: These are spatially-separated CV scores using RandomForest.")
 print(f"Your deep learning model may perform differently, but this gives spatial robustness baseline.")
+
+# Save CV results to CSV
+cv_results_df = pd.DataFrame(kfold_scores)
+cv_results_df['fold'] = range(1, len(cv_results_df) + 1)
+cv_results_df = cv_results_df[['fold'] + [col for col in cv_results_df.columns if col != 'fold']]
+cv_results_df.to_csv('spatial_cv_results.csv', index=False)
+print(f"\nSpatial CV results saved to 'spatial_cv_results.csv'")
 
 #save the split datasets
 X_train_scaled_df.to_csv("X_train.csv", index=False)
@@ -581,29 +616,40 @@ def evaluate_model_advanced(model, X_test_tensor, y_test_tensor, threshold=0.5, 
         true = y_test_tensor.int().cpu().numpy()
         probs_np = probabilities.cpu().numpy()
 
+        # Calculate all metrics
         acc = accuracy_score(true, predicted)
         precision = precision_score(true, predicted, zero_division=0)
         recall = recall_score(true, predicted, zero_division=0)
         f1 = f1_score(true, predicted, zero_division=0)
-        auc = roc_auc_score(true, probs_np)
+        auroc = roc_auc_score(true, probs_np)
+        pr_auc = average_precision_score(true, probs_np)
+        mcc = matthews_corrcoef(true, predicted)
+        brier = brier_score_loss(true, probs_np)
 
-        print(f"\nAdvanced Evaluation (threshold={threshold}):")
-        print(f"Test Accuracy: {acc:.4f}")
-        print(f"Precision: {precision:.4f}")
-        print(f"Recall: {recall:.4f}")
-        print(f"F1 Score: {f1:.4f}")
-        print(f"AUC-ROC: {auc:.4f}")
+        print(f"\n=== ADVANCED EVALUATION (threshold={threshold:.3f}) ===")
+        print(f"{'Metric':<20} {'Score':<10}")
+        print(f"{'-'*30}")
+        print(f"{'Overall Accuracy':<20} {acc:.4f}")
+        print(f"{'Precision':<20} {precision:.4f}")
+        print(f"{'Recall':<20} {recall:.4f}")
+        print(f"{'F1 Score':<20} {f1:.4f}")
+        print(f"{'AUROC':<20} {auroc:.4f}")
+        print(f"{'PR-AUC':<20} {pr_auc:.4f}")
+        print(f"{'MCC':<20} {mcc:.4f}")
+        print(f"{'Brier Score':<20} {brier:.4f}")
         
         # Classification report
         print(f"\nClassification Report:")
         print(classification_report(true, predicted, target_names=['Non-Landslide', 'Landslide']))
         
-        # ROC Curve
-        fpr, tpr, thresholds = roc_curve(true, probs_np)
-        plt.figure(figsize=(15, 5))
+        # ROC Curve and Precision-Recall Curve
+        fpr, tpr, _ = roc_curve(true, probs_np)
+        precision_curve, recall_curve, _ = precision_recall_curve(true, probs_np)
         
-        plt.subplot(1, 3, 1)
-        plt.plot(fpr, tpr, color='darkorange', lw=2, label=f'ROC curve (AUC = {auc:.3f})')
+        plt.figure(figsize=(20, 5))
+        
+        plt.subplot(1, 4, 1)
+        plt.plot(fpr, tpr, color='darkorange', lw=2, label=f'ROC (AUROC = {auroc:.3f})')
         plt.plot([0, 1], [0, 1], color='navy', lw=2, linestyle='--')
         plt.xlim([0.0, 1.0])
         plt.ylim([0.0, 1.05])
@@ -613,9 +659,19 @@ def evaluate_model_advanced(model, X_test_tensor, y_test_tensor, threshold=0.5, 
         plt.legend(loc="lower right")
         plt.grid(True)
         
+        plt.subplot(1, 4, 2)
+        plt.plot(recall_curve, precision_curve, color='blue', lw=2, label=f'PR (PR-AUC = {pr_auc:.3f})')
+        plt.xlim([0.0, 1.0])
+        plt.ylim([0.0, 1.05])
+        plt.xlabel('Recall')
+        plt.ylabel('Precision')
+        plt.title('Precision-Recall Curve')
+        plt.legend(loc="lower left")
+        plt.grid(True)
+        
         # Confusion matrix
         cm = confusion_matrix(true, predicted)
-        plt.subplot(1, 3, 2)
+        plt.subplot(1, 4, 3)
         sns.heatmap(cm, annot=True, fmt='d', cmap='Blues', 
                     xticklabels=['Non-Landslide', 'Landslide'],
                     yticklabels=['Non-Landslide', 'Landslide'])
@@ -624,7 +680,7 @@ def evaluate_model_advanced(model, X_test_tensor, y_test_tensor, threshold=0.5, 
         plt.xlabel('Predicted')
         
         # Prediction probability distribution
-        plt.subplot(1, 3, 3)
+        plt.subplot(1, 4, 4)
         plt.hist(probs_np[true == 0], bins=30, alpha=0.7, label='Non-Landslide', color='blue')
         plt.hist(probs_np[true == 1], bins=30, alpha=0.7, label='Landslide', color='red')
         plt.axvline(threshold, color='black', linestyle='--', label=f'Threshold: {threshold}')
@@ -649,15 +705,41 @@ def evaluate_model_advanced(model, X_test_tensor, y_test_tensor, threshold=0.5, 
         for u, c in zip(unique, counts):
             print(f"Class {u}: {c} samples ({c/len(true)*100:.1f}%)")
         
-        return acc, precision, recall, f1, auc
+        # Save metrics to dictionary
+        metrics_dict = {
+            'Overall Accuracy': acc,
+            'Precision': precision,
+            'Recall': recall,
+            'F1 Score': f1,
+            'AUROC': auroc,
+            'PR-AUC': pr_auc,
+            'MCC': mcc,
+            'Brier Score': brier
+        }
+        
+        return acc, precision, recall, f1, auroc, pr_auc, mcc, brier, metrics_dict
 
 # Evaluate with default threshold
-print("=== Evaluation with default threshold (0.5) ===")        
-evaluate_model_advanced(model, X_test_tensor, y_test_tensor, threshold=0.5, device=device)
+print("\n" + "="*60)
+print("FINAL MODEL EVALUATION ON SPATIALLY SEPARATED TEST SET")
+print("="*60)
+print("\n=== Evaluation with default threshold (0.5) ===")        
+results_default = evaluate_model_advanced(model, X_test_tensor, y_test_tensor, threshold=0.5, device=device)
 
 # Evaluate with optimized threshold
-print(f"\n=== Evaluation with optimized threshold ({best_threshold}) ===")
-evaluate_model_advanced(model, X_test_tensor, y_test_tensor, threshold=best_threshold, device=device)
+print(f"\n=== Evaluation with optimized threshold ({best_threshold:.3f}) ===")
+results_optimized = evaluate_model_advanced(model, X_test_tensor, y_test_tensor, threshold=best_threshold, device=device)
+
+# Save final metrics to CSV
+final_metrics_df = pd.DataFrame({
+    'Metric': ['Overall Accuracy', 'Precision', 'Recall', 'F1 Score', 'AUROC', 'PR-AUC', 'MCC', 'Brier Score'],
+    'Threshold_0.5': [results_default[0], results_default[1], results_default[2], results_default[3], 
+                      results_default[4], results_default[5], results_default[6], results_default[7]],
+    'Optimized_Threshold': [results_optimized[0], results_optimized[1], results_optimized[2], results_optimized[3],
+                           results_optimized[4], results_optimized[5], results_optimized[6], results_optimized[7]]
+})
+final_metrics_df.to_csv('final_test_metrics.csv', index=False)
+print(f"\nFinal test metrics saved to 'final_test_metrics.csv'")
 
 print(f"\n=== SPATIAL VALIDATION SUMMARY ===")
 print(f"✓ Used spatial blocks for train/test separation")

@@ -29,7 +29,28 @@ expected_raster_names = [
 ]
 
 # Get all available raster files
-available_rasters = glob.glob("/home/anees/Dropbox/geoProject/alignedRasters/*.tif")
+# Try multiple possible relative paths
+import os
+possible_paths = [
+    "../../alignedRasters/*.tif",
+    "../alignedRasters/*.tif",
+    "../../OneDrive/geoProject/alignedRasters/*.tif",
+    "../../../OneDrive/geoProject/alignedRasters/*.tif"
+]
+
+available_rasters = []
+for path_pattern in possible_paths:
+    found = glob.glob(path_pattern)
+    if found:
+        available_rasters = found
+        print(f"  Found rasters at: {path_pattern}")
+        break
+
+if not available_rasters:
+    print("ERROR: Could not find aligned rasters in any expected location")
+    print("Searched paths:", possible_paths)
+    exit(1)
+
 available_names = [f.split('/')[-1] for f in available_rasters]
 
 # Create ordered raster paths
@@ -65,8 +86,8 @@ print(f"Processing in chunks of {CHUNK_SIZE:,} pixels to manage memory")
 
 # Load training data to get the exact feature structure and encoding mappings
 print("Loading training data to understand feature structure...")
-landslides = pd.read_csv("output_landslides.csv")
-nonLandslides = pd.read_csv("output_non_landslides.csv")
+landslides = pd.read_csv("../output_landslides.csv")
+nonLandslides = pd.read_csv("../output_non_landslides.csv")
 
 # Combine datasets
 combined = pd.concat([landslides, nonLandslides], ignore_index=True)
@@ -112,8 +133,27 @@ print(f"Unique soil values: {sorted(soil_values)}")
 # Load model
 print("Loading trained model...")
 try:
+    # Try multiple possible paths for the model file
+    model_paths = [
+        "landslide_model_advanced_complete.pth",
+        "../landslide_model_advanced_complete.pth",
+        "./landslide_model_advanced_complete.pth"
+    ]
+    
+    model_file = None
+    for model_path in model_paths:
+        if os.path.exists(model_path):
+            model_file = model_path
+            print(f"  Found model at: {model_path}")
+            break
+    
+    if model_file is None:
+        print("ERROR: Could not find landslide_model_advanced_complete.pth")
+        print("Searched paths:", model_paths)
+        exit(1)
+    
     # Try loading with weights_only=False (PyTorch 2.6+ compatibility)
-    model_data = torch.load("landslide_model_advanced_complete.pth", weights_only=False)
+    model_data = torch.load(model_file, weights_only=False)
     
     # Check if it's a dictionary containing the model
     if isinstance(model_data, dict):
