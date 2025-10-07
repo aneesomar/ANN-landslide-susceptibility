@@ -160,15 +160,48 @@ if len(raster_paths) != len(expected_raster_order):
     print("Cannot proceed with mismatched raster count")
     exit(1)
 
-# Fit scaler on continuous variables only
+# CRITICAL FIX: Fit scaler on RASTER min/max, not training sample min/max
+# The training data was already normalized, but we need to apply the SAME normalization
+# to new raster data. This requires knowing the original raster ranges.
+print("\nCalculating min/max from full rasters for proper scaling...")
+print("(This ensures consistent normalization between training and prediction)")
+
+raster_mins = []
+raster_maxs = []
+
+# Calculate min/max from each continuous raster
+for i, raster_path in enumerate(raster_paths[:len(columns_to_scale)]):
+    raster_name = raster_path.split('/')[-1]
+    print(f"  Scanning {raster_name}...")
+    
+    # We already loaded these arrays earlier
+    raster_data = arrays[i]
+    valid_data = raster_data[~np.isnan(raster_data)]
+    
+    if len(valid_data) > 0:
+        raster_min = valid_data.min()
+        raster_max = valid_data.max()
+        raster_mins.append(raster_min)
+        raster_maxs.append(raster_max)
+        print(f"    Range: {raster_min:.2f} to {raster_max:.2f}")
+    else:
+        print(f"    WARNING: No valid data found")
+        raster_mins.append(0)
+        raster_maxs.append(1)
+
+# Create scaler with raster-based ranges
 scaler = MinMaxScaler()
-scaler.fit(combined[columns_to_scale])
+# Manually set the scaler parameters based on actual raster ranges
+scaler.fit([raster_mins, raster_maxs])
+
+print(f"\nScaler fitted on RASTER ranges (not training sample ranges)")
+print(f"This will produce predictions consistent with training normalization")
 
 # Get unique values for one-hot encoding mapping
 lithology_values = combined[lithology_cols].idxmax(axis=1).str.replace('lithology_', '').astype(int).unique()
 soil_values = combined[soil_cols].idxmax(axis=1).str.replace('soil_', '').astype(int).unique()
 
-print(f"Unique lithology values: {sorted(lithology_values)}")
+print(f"\nUnique lithology values: {sorted(lithology_values)}")
 print(f"Unique soil values: {sorted(soil_values)}")
 
 # Load model
