@@ -1,9 +1,10 @@
 import pandas as pd
-from sklearn.model_selection import train_test_split, StratifiedKFold
+from sklearn.model_selection import train_test_split, StratifiedKFold, GroupKFold, GroupShuffleSplit
 from sklearn.preprocessing import StandardScaler, RobustScaler
 from sklearn.feature_selection import SelectKBest, f_classif, RFE
 from sklearn.ensemble import RandomForestClassifier
 from sklearn.utils.class_weight import compute_class_weight
+from sklearn.cluster import KMeans
 import torch
 from torch.utils.data import TensorDataset, DataLoader, WeightedRandomSampler
 import torch.nn as nn
@@ -45,7 +46,11 @@ X = X.apply(pd.to_numeric, errors='coerce')
 # Drop or fill missing values (e.g., those blanks you saw)
 X = X.fillna(0)  
 
-# Drop unwanted columns BEFORE splitting
+# KEEP coordinates for spatial CV - extract before dropping
+coordinates = X[['xcoord', 'ycoord']].copy()
+print(f"Coordinate ranges: X({coordinates['xcoord'].min():.0f} to {coordinates['xcoord'].max():.0f}), Y({coordinates['ycoord'].min():.0f} to {coordinates['ycoord'].max():.0f})")
+
+# Drop unwanted columns AFTER extracting coordinates
 X = X.drop(columns=["xcoord", "ycoord", "fid"], errors="ignore")
 
 #################################Feature Selection#################################
@@ -96,10 +101,133 @@ print(f"Selected features: {list(selected_features)[:10]}...")  # Show first 10
 # Print feature info
 print(f"Data shape: {X_selected.shape}")
 
-# Train-test split (e.g., 80% train, 20% test)
-X_train, X_test, y_train, y_test = train_test_split(
-    X_selected, y, test_size=0.2, stratify=y, random_state=42
-)
+#################################Spatial Blocking for CV#################################
+
+def create_spatial_blocks(coords, method='grid', n_blocks=25, buffer_distance=None):
+    """
+    Create spatial blocks for cross-validation
+    
+    Parameters:
+    - coords: DataFrame with 'xcoord', 'ycoord' columns
+    - method: 'grid' or 'kmeans'
+    - n_blocks: number of blocks (for grid: will be made square, for kmeans: exact number)
+    - buffer_distance: distance for buffer zones (optional)
+    
+    Returns:
+    - block_ids: array of block assignments for each sample
+    """
+    print(f"Creating spatial blocks using {method} method...")
+    
+    if method == 'grid':
+        # Create square grid
+        n_side = int(np.sqrt(n_blocks))
+        actual_blocks = n_side * n_side
+        print(f"Using {n_side}x{n_side} = {actual_blocks} grid blocks")
+        
+        x_bins = np.linspace(coords['xcoord'].min(), coords['xcoord'].max(), n_side + 1)
+        y_bins = np.linspace(coords['ycoord'].min(), coords['ycoord'].max(), n_side + 1)
+        
+        x_block = np.digitize(coords['xcoord'], x_bins) - 1
+        y_block = np.digitize(coords['ycoord'], y_bins) - 1
+        
+        # Ensure blocks are within bounds
+        x_block = np.clip(x_block, 0, n_side - 1)
+        y_block = np.clip(y_block, 0, n_side - 1)
+        
+        block_ids = y_block * n_side + x_block
+        
+    elif method == 'kmeans':
+        # Use K-means clustering for irregular blocks
+        print(f"Using K-means clustering for {n_blocks} blocks")
+        kmeans = KMeans(n_clusters=n_blocks, random_state=42, n_init=10)
+        block_ids = kmeans.fit_predict(coords[['xcoord', 'ycoord']])
+    
+    print(f"Created {len(np.unique(block_ids))} spatial blocks")
+    print(f"Block sizes: min={np.bincount(block_ids).min()}, max={np.bincount(block_ids).max()}, mean={np.bincount(block_ids).mean():.0f}")
+    
+    return block_ids
+
+def check_spatial_separation(coords, block_ids, fold_assignment):
+    """
+    Check spatial separation between train/test folds
+    """
+    unique_folds = np.unique(fold_assignment)
+    min_distances = []
+    
+    for test_fold in unique_folds:
+        train_mask = fold_assignment != test_fold
+        test_mask = fold_assignment == test_fold
+        
+        if not test_mask.any() or not train_mask.any():
+            continue
+            
+        train_coords = coords[train_mask]
+        test_coords = coords[test_mask]
+        
+        # Calculate minimum distance between train and test regions
+        from scipy.spatial.distance import cdist
+        distances = cdist(test_coords[['xcoord', 'ycoord']], 
+                         train_coords[['xcoord', 'ycoord']])
+        min_dist = distances.min()
+        min_distances.append(min_dist)
+        
+    avg_min_distance = np.mean(min_distances) if min_distances else 0
+    print(f"Average minimum distance between train/test regions: {avg_min_distance:.0f} units")
+    return avg_min_distance
+
+# Create spatial blocks
+block_ids = create_spatial_blocks(coordinates, method='grid', n_blocks=25)
+
+# Check class distribution across blocks
+block_class_dist = pd.DataFrame({
+    'block': block_ids,
+    'class': y.values
+}).groupby('block')['class'].agg(['count', 'mean']).reset_index()
+
+print(f"\nBlock class distribution:")
+print(f"Blocks with landslides: {(block_class_dist['mean'] > 0).sum()}/{len(block_class_dist)}")
+print(f"Average landslide rate per block: {block_class_dist['mean'].mean():.3f}")
+print(f"Blocks with <10 samples: {(block_class_dist['count'] < 10).sum()}")
+
+# Remove very small blocks to avoid CV issues
+min_block_size = 10
+valid_blocks = block_class_dist[block_class_dist['count'] >= min_block_size]['block'].values
+valid_mask = np.isin(block_ids, valid_blocks)
+
+print(f"Keeping {valid_mask.sum()}/{len(block_ids)} samples in blocks with >={min_block_size} samples")
+
+# Filter data to valid blocks only
+X_selected_spatial = X_selected[valid_mask]
+y_spatial = y[valid_mask]
+coordinates_spatial = coordinates[valid_mask]
+block_ids_spatial = block_ids[valid_mask]
+
+print(f"Final data shape for spatial CV: {X_selected_spatial.shape}")
+
+#################################Spatial Train-Test Split#################################
+
+# Use spatial split for final holdout test set
+print("\nPerforming spatial train-test split...")
+gss = GroupShuffleSplit(test_size=0.2, n_splits=1, random_state=42)
+train_idx, test_idx = next(gss.split(X_selected_spatial, y_spatial, groups=block_ids_spatial))
+
+X_train = X_selected_spatial.iloc[train_idx]
+X_test = X_selected_spatial.iloc[test_idx]
+y_train = y_spatial.iloc[train_idx]
+y_test = y_spatial.iloc[test_idx]
+
+# Check spatial separation
+coords_train = coordinates_spatial.iloc[train_idx]
+coords_test = coordinates_spatial.iloc[test_idx]
+
+print(f"Train set: {len(X_train)} samples, {y_train.mean():.3f} landslide rate")
+print(f"Test set: {len(X_test)} samples, {y_test.mean():.3f} landslide rate")
+
+# Verify spatial separation
+fold_assignment = np.full(len(X_selected_spatial), -1)
+fold_assignment[train_idx] = 0
+fold_assignment[test_idx] = 1
+check_spatial_separation(coordinates_spatial.reset_index(drop=True), block_ids_spatial, fold_assignment)
 
 # Use RobustScaler instead of StandardScaler (better for outliers)
 scaler = RobustScaler()
@@ -110,6 +238,71 @@ X_test_scaled = scaler.transform(X_test)
 X_train_scaled_df = pd.DataFrame(X_train_scaled, columns=X_train.columns, index=X_train.index)
 X_test_scaled_df = pd.DataFrame(X_test_scaled, columns=X_test.columns, index=X_test.index)
 
+#################################Spatial Cross-Validation Evaluation#################################
+
+print("\n=== SPATIAL CROSS-VALIDATION EVALUATION ===")
+print("Performing 5-fold spatial CV to assess model robustness...")
+
+# Use GroupKFold for spatial CV on training data
+gkf = GroupKFold(n_splits=5)
+kfold_scores = {'accuracy': [], 'precision': [], 'recall': [], 'f1': [], 'auc': []}
+
+# Get blocks for training data only
+train_blocks = block_ids_spatial[train_idx]
+train_coords = coordinates_spatial.iloc[train_idx]
+
+fold_num = 0
+for cv_train_idx, cv_val_idx in gkf.split(X_train, y_train, groups=train_blocks):
+    fold_num += 1
+    print(f"\nFold {fold_num}/5:")
+    
+    # Split data
+    X_cv_train, X_cv_val = X_train.iloc[cv_train_idx], X_train.iloc[cv_val_idx]
+    y_cv_train, y_cv_val = y_train.iloc[cv_train_idx], y_train.iloc[cv_val_idx]
+    
+    print(f"  CV Train: {len(X_cv_train)} samples, {y_cv_train.mean():.3f} landslide rate")
+    print(f"  CV Val: {len(X_cv_val)} samples, {y_cv_val.mean():.3f} landslide rate")
+    
+    # Scale data
+    fold_scaler = RobustScaler()
+    X_cv_train_scaled = fold_scaler.fit_transform(X_cv_train)
+    X_cv_val_scaled = fold_scaler.transform(X_cv_val)
+    
+    # Quick model training for CV (simpler model for speed)
+    from sklearn.ensemble import RandomForestClassifier
+    from sklearn.metrics import accuracy_score, precision_score, recall_score, f1_score, roc_auc_score
+    
+    cv_model = RandomForestClassifier(n_estimators=100, random_state=42, n_jobs=-1, class_weight='balanced')
+    cv_model.fit(X_cv_train_scaled, y_cv_train)
+    
+    # Predictions
+    y_cv_pred = cv_model.predict(X_cv_val_scaled)
+    y_cv_prob = cv_model.predict_proba(X_cv_val_scaled)[:, 1]
+    
+    # Calculate metrics
+    fold_acc = accuracy_score(y_cv_val, y_cv_pred)
+    fold_prec = precision_score(y_cv_val, y_cv_pred, zero_division=0)
+    fold_rec = recall_score(y_cv_val, y_cv_pred, zero_division=0)
+    fold_f1 = f1_score(y_cv_val, y_cv_pred, zero_division=0)
+    fold_auc = roc_auc_score(y_cv_val, y_cv_prob) if len(np.unique(y_cv_val)) > 1 else 0
+    
+    kfold_scores['accuracy'].append(fold_acc)
+    kfold_scores['precision'].append(fold_prec)
+    kfold_scores['recall'].append(fold_rec)
+    kfold_scores['f1'].append(fold_f1)
+    kfold_scores['auc'].append(fold_auc)
+    
+    print(f"  Metrics: Acc={fold_acc:.3f}, Prec={fold_prec:.3f}, Rec={fold_rec:.3f}, F1={fold_f1:.3f}, AUC={fold_auc:.3f}")
+
+# Print CV summary
+print(f"\n=== SPATIAL CV SUMMARY (5-fold) ===")
+for metric, scores in kfold_scores.items():
+    mean_score = np.mean(scores)
+    std_score = np.std(scores)
+    print(f"{metric.upper()}: {mean_score:.3f} ± {std_score:.3f}")
+
+print(f"\nNote: These are spatially-separated CV scores using RandomForest.")
+print(f"Your deep learning model may perform differently, but this gives spatial robustness baseline.")
 
 #save the split datasets
 X_train_scaled_df.to_csv("X_train.csv", index=False)
@@ -465,6 +658,13 @@ evaluate_model_advanced(model, X_test_tensor, y_test_tensor, threshold=0.5, devi
 # Evaluate with optimized threshold
 print(f"\n=== Evaluation with optimized threshold ({best_threshold}) ===")
 evaluate_model_advanced(model, X_test_tensor, y_test_tensor, threshold=best_threshold, device=device)
+
+print(f"\n=== SPATIAL VALIDATION SUMMARY ===")
+print(f"✓ Used spatial blocks for train/test separation")
+print(f"✓ Applied 5-fold spatial cross-validation")
+print(f"✓ Test set is spatially separated from training data")
+print(f"✓ Results represent model performance on NEW geographic areas")
+print(f"\nThis is more realistic than random CV for landslide susceptibility mapping.")
 
 # Feature importance analysis
 print("\n=== Feature Importance Analysis ===")
