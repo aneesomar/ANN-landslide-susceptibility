@@ -68,14 +68,35 @@ print(f"Using {len(raster_paths)} raster files in correct order")
 # Read and stack - but be more memory efficient
 print("Reading raster data...")
 arrays = []
+nodata_values = []
 for i, path in enumerate(raster_paths):
     print(f"  Reading {path.split('/')[-1]}...")
     with rasterio.open(path) as src:
-        arrays.append(src.read(1))  # Read first band
+        data = src.read(1).astype(np.float32)  # Convert to float for NaN handling
+        nodata_val = src.nodata
+        nodata_values.append(nodata_val)
+        print(f"    NoData value from metadata: {nodata_val}")
+        
+        # Replace NoData values with NaN for consistent handling
+        # Check both metadata value and common NoData markers
+        if nodata_val is not None:
+            data = np.where(data == nodata_val, np.nan, data)
+        
+        # Also check for common NoData value -99999 (or similar)
+        data = np.where(data <= -99999, np.nan, data)
+        data = np.where(data == -9999, np.nan, data)
+        
+        # Count NoData pixels
+        nodata_count = np.isnan(data).sum()
+        valid_count = (~np.isnan(data)).sum()
+        print(f"    Valid pixels: {valid_count:,} | NoData pixels: {nodata_count:,}")
+        
+        arrays.append(data)
 
 # Convert to 3D array: (bands, height, width)
 stacked = np.stack(arrays, axis=0)
 print("Shape of stacked raster:", stacked.shape)  # (bands, height, width)
+print(f"NoData values from rasters: {nodata_values}")
 
 # Get dimensions
 bands, height, width = stacked.shape
@@ -86,8 +107,28 @@ print(f"Processing in chunks of {CHUNK_SIZE:,} pixels to manage memory")
 
 # Load training data to get the exact feature structure and encoding mappings
 print("Loading training data to understand feature structure...")
-landslides = pd.read_csv("../output_landslides.csv")
-nonLandslides = pd.read_csv("../output_non_landslides.csv")
+
+# Try multiple possible paths for CSV files
+csv_paths = [
+    ("../output_landslides.csv", "../output_non_landslides.csv"),
+    ("output_landslides.csv", "output_non_landslides.csv"),
+    ("../../output_landslides.csv", "../../output_non_landslides.csv")
+]
+
+landslides = None
+nonLandslides = None
+
+for landslides_path, non_landslides_path in csv_paths:
+    if os.path.exists(landslides_path) and os.path.exists(non_landslides_path):
+        landslides = pd.read_csv(landslides_path)
+        nonLandslides = pd.read_csv(non_landslides_path)
+        print(f"  Found CSV files at: {landslides_path}")
+        break
+
+if landslides is None or nonLandslides is None:
+    print("ERROR: Could not find output_landslides.csv and output_non_landslides.csv")
+    print("Searched paths:", [path[0] for path in csv_paths])
+    exit(1)
 
 # Combine datasets
 combined = pd.concat([landslides, nonLandslides], ignore_index=True)
@@ -134,10 +175,15 @@ print(f"Unique soil values: {sorted(soil_values)}")
 print("Loading trained model...")
 try:
     # Try multiple possible paths for the model file
+    # Determine the script directory to find model relative to script location
+    script_dir = os.path.dirname(os.path.abspath(__file__))
+    
     model_paths = [
-        "landslide_model_advanced_complete.pth",
-        "../landslide_model_advanced_complete.pth",
-        "./landslide_model_advanced_complete.pth"
+        os.path.join(script_dir, "landslide_model_advanced_complete.pth"),  # Same dir as script
+        "landslide_model_advanced_complete.pth",  # Current working directory
+        "../landslide_model_advanced_complete.pth",  # Parent directory
+        "./landslide_model_advanced_complete.pth",  # Explicit current dir
+        "ANN-landslide-susceptibility/landslide_model_advanced_complete.pth"  # From parent
     ]
     
     model_file = None
@@ -295,8 +341,16 @@ for chunk_start in range(0, total_pixels, CHUNK_SIZE):
     # Extract chunk from stacked rasters
     chunk_data = stacked.reshape(bands, -1)[:, chunk_start:chunk_end].T  # Shape: (chunk_size, bands)
     
-    # Check for valid pixels (no NaN values)
+    # Check for valid pixels (no NaN values in any band)
     valid_mask_chunk = ~np.isnan(chunk_data).any(axis=1)
+    
+    # Additional check: ensure no suspicious values that might be NoData markers
+    # Common NoData values: -9999, -3.4e38, 0 (in some cases)
+    suspicious_mask = (
+        (np.abs(chunk_data) > 1e10).any(axis=1) |  # Extremely large values
+        ((chunk_data == 0).all(axis=1))  # All zeros across all bands (likely NoData)
+    )
+    valid_mask_chunk = valid_mask_chunk & ~suspicious_mask
     
     if not valid_mask_chunk.any():
         print("  No valid pixels in this chunk, skipping...")
