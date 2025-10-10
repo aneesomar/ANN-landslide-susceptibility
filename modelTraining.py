@@ -207,38 +207,72 @@ block_ids_spatial = block_ids[valid_mask]
 
 print(f"Final data shape for spatial CV: {X_selected_spatial.shape}")
 
-#################################Spatial Train-Test Split#################################
+#################################Spatial Train-Validation-Test Split#################################
 
-# Use spatial split for final holdout test set
-print("\nPerforming spatial train-test split...")
-gss = GroupShuffleSplit(test_size=0.2, n_splits=1, random_state=42)
-train_idx, test_idx = next(gss.split(X_selected_spatial, y_spatial, groups=block_ids_spatial))
+# Use spatial split for proper train/validation/test sets
+print("\n=== PERFORMING SPATIAL TRAIN/VALIDATION/TEST SPLIT ===")
 
-X_train = X_selected_spatial.iloc[train_idx]
+# First split: 80% train+val, 20% test (final holdout)
+print("\nStep 1: Splitting into Train+Val (80%) and Test (20%)...")
+gss_test = GroupShuffleSplit(test_size=0.2, n_splits=1, random_state=42)
+trainval_idx, test_idx = next(gss_test.split(X_selected_spatial, y_spatial, groups=block_ids_spatial))
+
+X_trainval = X_selected_spatial.iloc[trainval_idx]
 X_test = X_selected_spatial.iloc[test_idx]
-y_train = y_spatial.iloc[train_idx]
+y_trainval = y_spatial.iloc[trainval_idx]
 y_test = y_spatial.iloc[test_idx]
-
-# Check spatial separation
-coords_train = coordinates_spatial.iloc[train_idx]
+coords_trainval = coordinates_spatial.iloc[trainval_idx]
 coords_test = coordinates_spatial.iloc[test_idx]
+blocks_trainval = block_ids_spatial[trainval_idx]
 
-print(f"Train set: {len(X_train)} samples, {y_train.mean():.3f} landslide rate")
-print(f"Test set: {len(X_test)} samples, {y_test.mean():.3f} landslide rate")
+print(f"  Train+Val set: {len(X_trainval)} samples, {y_trainval.mean():.3f} landslide rate")
+print(f"  Test set: {len(X_test)} samples, {y_test.mean():.3f} landslide rate")
 
-# Verify spatial separation
+# Second split: Split train+val into 75% train, 25% validation (which gives 60% train, 20% val of total)
+print("\nStep 2: Splitting Train+Val into Train (75%) and Validation (25%)...")
+gss_val = GroupShuffleSplit(test_size=0.25, n_splits=1, random_state=42)
+train_idx, val_idx = next(gss_val.split(X_trainval, y_trainval, groups=blocks_trainval))
+
+X_train = X_trainval.iloc[train_idx]
+X_val = X_trainval.iloc[val_idx]
+y_train = y_trainval.iloc[train_idx]
+y_val = y_trainval.iloc[val_idx]
+coords_train = coords_trainval.iloc[train_idx]
+coords_val = coords_trainval.iloc[val_idx]
+
+print(f"  Train set: {len(X_train)} samples, {y_train.mean():.3f} landslide rate")
+print(f"  Validation set: {len(X_val)} samples, {y_val.mean():.3f} landslide rate")
+print(f"  Test set: {len(X_test)} samples, {y_test.mean():.3f} landslide rate")
+
+# Calculate percentages
+total_samples = len(X_selected_spatial)
+print(f"\nFinal split percentages:")
+print(f"  Train: {len(X_train)/total_samples*100:.1f}%")
+print(f"  Validation: {len(X_val)/total_samples*100:.1f}%")
+print(f"  Test: {len(X_test)/total_samples*100:.1f}%")
+
+# Verify spatial separation between all three sets
+print("\nVerifying spatial separation between sets...")
 fold_assignment = np.full(len(X_selected_spatial), -1)
-fold_assignment[train_idx] = 0
-fold_assignment[test_idx] = 1
+fold_assignment[trainval_idx[train_idx]] = 0  # Train
+fold_assignment[trainval_idx[val_idx]] = 1    # Validation
+fold_assignment[test_idx] = 2                  # Test
 check_spatial_separation(coordinates_spatial.reset_index(drop=True), block_ids_spatial, fold_assignment)
 
-# Use RobustScaler instead of StandardScaler (better for outliers)
+# Use RobustScaler - fit only on training data!
+print("\nScaling features using RobustScaler (fitted on training data only)...")
 scaler = RobustScaler()
 X_train_scaled = scaler.fit_transform(X_train)
+X_val_scaled = scaler.transform(X_val)
 X_test_scaled = scaler.transform(X_test)
+
+print("  ✓ Scaler fitted on training data")
+print("  ✓ Applied to validation data")
+print("  ✓ Applied to test data (for final evaluation only)")
 
 # Convert back to DataFrames to maintain column names for saving
 X_train_scaled_df = pd.DataFrame(X_train_scaled, columns=X_train.columns, index=X_train.index)
+X_val_scaled_df = pd.DataFrame(X_val_scaled, columns=X_val.columns, index=X_val.index)
 X_test_scaled_df = pd.DataFrame(X_test_scaled, columns=X_test.columns, index=X_test.index)
 
 #################################Spatial Cross-Validation Evaluation#################################
@@ -340,36 +374,56 @@ cv_results_df.to_csv('spatial_cv_results.csv', index=False)
 print(f"\nSpatial CV results saved to 'spatial_cv_results.csv'")
 
 #save the split datasets
+print("\nSaving train/validation/test splits to CSV files...")
 X_train_scaled_df.to_csv("X_train.csv", index=False)
+X_val_scaled_df.to_csv("X_val.csv", index=False)
 X_test_scaled_df.to_csv("X_test.csv", index=False)
 y_train.to_csv("y_train.csv", index=False)
+y_val.to_csv("y_val.csv", index=False)
 y_test.to_csv("y_test.csv", index=False)
+print("  ✓ Saved X_train.csv, X_val.csv, X_test.csv")
+print("  ✓ Saved y_train.csv, y_val.csv, y_test.csv")
 
 ############################ Convert to torch tensors ############################
 # Convert to torch tensors using scaled data
 X_train_tensor = torch.tensor(X_train_scaled, dtype=torch.float32)
 y_train_tensor = torch.tensor(y_train.values, dtype=torch.float32).unsqueeze(1)
 
+X_val_tensor = torch.tensor(X_val_scaled, dtype=torch.float32)
+y_val_tensor = torch.tensor(y_val.values, dtype=torch.float32).unsqueeze(1)
+
 X_test_tensor = torch.tensor(X_test_scaled, dtype=torch.float32)
 y_test_tensor = torch.tensor(y_test.values, dtype=torch.float32).unsqueeze(1)
+
+print("\nCreated PyTorch tensors for train/validation/test sets")
 
 # Calculate class weights for imbalanced learning
 class_weights = compute_class_weight('balanced', classes=np.unique(y_train), y=y_train)
 class_weight_dict = {0: class_weights[0], 1: class_weights[1]}
 print(f"Class weights: {class_weight_dict}")
 
-# Create weighted sampler for balanced training
-y_train_np = y_train.values
-sample_weights = [class_weight_dict[label] for label in y_train_np]
-sampler = WeightedRandomSampler(sample_weights, len(sample_weights))
+# Calculate pos_weight for BCEWithLogitsLoss to handle class imbalance
+# This helps the model produce predictions in the full 0-1 range
+pos_weight = torch.tensor([class_weights[1] / class_weights[0]], dtype=torch.float32)
+print(f"Positive class weight for BCE: {pos_weight.item():.3f}")
 
-# Wrap into datasets
+# Don't use weighted sampler - it can cause overfitting
+# Instead, rely on pos_weight in the loss function
+# Create datasets without weighted sampling
 train_dataset = TensorDataset(X_train_tensor, y_train_tensor)
+val_dataset = TensorDataset(X_val_tensor, y_val_tensor)
 test_dataset = TensorDataset(X_test_tensor, y_test_tensor)
 
-# Dataloaders with weighted sampling
-train_loader = DataLoader(train_dataset, batch_size=64, sampler=sampler)  # Increased batch size
-test_loader = DataLoader(test_dataset, batch_size=64)
+# Dataloaders with standard sampling (no weights)
+train_loader = DataLoader(train_dataset, batch_size=128, shuffle=True)
+val_loader = DataLoader(val_dataset, batch_size=128, shuffle=False)
+test_loader = DataLoader(test_dataset, batch_size=128, shuffle=False)
+
+print(f"\nDataLoaders created:")
+print(f"  Train batches: {len(train_loader)} (batch_size=128)")
+print(f"  Validation batches: {len(val_loader)} (batch_size=128)")
+print(f"  Test batches: {len(test_loader)} (batch_size=128)")
+print(f"  Note: Test loader will only be used for FINAL evaluation")
 
 
 
@@ -414,30 +468,30 @@ class AdvancedLandslideANN(nn.Module):
             nn.Linear(input_dim, 512),
             nn.BatchNorm1d(512),
             nn.ReLU(),
-            nn.Dropout(0.4)
+            nn.Dropout(0.5)  # Increased to combat overfitting
         )
         
         # Attention mechanism
         self.attention = AttentionLayer(512)
         
         # Residual blocks
-        self.res_block1 = ResidualBlock(512, 256, 0.3)
-        self.res_block2 = ResidualBlock(512, 256, 0.3)
+        self.res_block1 = ResidualBlock(512, 256, 0.4)  # Increased dropout
+        self.res_block2 = ResidualBlock(512, 256, 0.4)  # Increased dropout
         
         # Feature extraction layers
         self.feature_layers = nn.Sequential(
             nn.Linear(512, 256),
             nn.BatchNorm1d(256),
             nn.ReLU(),
-            nn.Dropout(0.3),
+            nn.Dropout(0.4),  # Increased to reduce overfitting
             nn.Linear(256, 128),
             nn.BatchNorm1d(128),
             nn.ReLU(),
-            nn.Dropout(0.2),
+            nn.Dropout(0.3),  # Increased to reduce overfitting
             nn.Linear(128, 64),
             nn.BatchNorm1d(64),
             nn.ReLU(),
-            nn.Dropout(0.1)
+            nn.Dropout(0.2)  # Increased to reduce overfitting
         )
         
         # Output layer
@@ -453,41 +507,38 @@ class AdvancedLandslideANN(nn.Module):
 
 model = AdvancedLandslideANN(X_train_scaled.shape[1])
 
-# Use focal loss for better handling of difficult examples
-class FocalLoss(nn.Module):
-    def __init__(self, alpha=1, gamma=2):
-        super(FocalLoss, self).__init__()
-        self.alpha = alpha
-        self.gamma = gamma
-        
-    def forward(self, inputs, targets):
-        bce_loss = F.binary_cross_entropy_with_logits(inputs, targets, reduction='none')
-        pt = torch.exp(-bce_loss)
-        focal_loss = self.alpha * (1-pt)**self.gamma * bce_loss
-        return focal_loss.mean()
+# Use standard BCE loss with pos_weight for class imbalance
+# This produces better calibrated probabilities than Focal Loss
+criterion = nn.BCEWithLogitsLoss(pos_weight=pos_weight)
+optimizer = torch.optim.AdamW(model.parameters(), lr=0.0005, weight_decay=5e-3)
 
-criterion = FocalLoss(alpha=1, gamma=2)
-optimizer = torch.optim.AdamW(model.parameters(), lr=0.001, weight_decay=1e-3)
-
-# Advanced learning rate scheduling with warm restart
-scheduler = torch.optim.lr_scheduler.CosineAnnealingWarmRestarts(
-    optimizer, T_0=20, T_mult=2, eta_min=1e-6
+# Use ReduceLROnPlateau for smoother learning rate reduction
+# This will reduce LR when validation loss plateaus, giving more stable training
+scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
+    optimizer, mode='min', factor=0.5, patience=8, min_lr=1e-6  # Reduced patience for faster response
 )
 
-# Advanced training loop with gradient clipping and mixed precision
+print("\nUsing ReduceLROnPlateau scheduler with aggressive regularization to prevent overfitting")
+
+# Advanced training loop with gradient clipping
 num_epochs = 150
 best_val_loss = float('inf')
 train_losses = []
 val_losses = []
-patience = 25
+patience = 20  # Reduced patience to stop earlier when overfitting
 patience_counter = 0
 
-# Enable mixed precision training for faster computation
-scaler_amp = torch.cuda.amp.GradScaler() if torch.cuda.is_available() else None
-device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+# Force CPU usage - GPU (CUDA 5.0) is incompatible with current PyTorch (requires CUDA 7.0+)
+device = torch.device('cpu')
+scaler_amp = None  # No mixed precision on CPU
+
+print(f"\nTraining on CPU (GPU CUDA capability 5.0 is incompatible with PyTorch)")
 model = model.to(device)
 
 print(f"Training on device: {device}")
+print(f"\n{'='*60}")
+print("STARTING TRAINING WITH PROPER TRAIN/VALIDATION/TEST SPLIT")
+print(f"{'='*60}\n")
 
 for epoch in range(num_epochs):
     model.train()
@@ -517,11 +568,11 @@ for epoch in range(num_epochs):
             
         running_loss += loss.item()
     
-    # Validation phase
+    # Validation phase - NOW USING PROPER VALIDATION SET!
     model.eval()
     val_loss = 0.0
     with torch.no_grad():
-        for X_batch, y_batch in test_loader:
+        for X_batch, y_batch in val_loader:  # Changed from test_loader to val_loader
             X_batch, y_batch = X_batch.to(device), y_batch.to(device)
             if scaler_amp is not None:
                 with torch.cuda.amp.autocast():
@@ -533,12 +584,13 @@ for epoch in range(num_epochs):
             val_loss += loss.item()
     
     avg_train_loss = running_loss / len(train_loader)
-    avg_val_loss = val_loss / len(test_loader)
+    avg_val_loss = val_loss / len(val_loader)  # Changed from test_loader
     
     train_losses.append(avg_train_loss)
     val_losses.append(avg_val_loss)
     
-    scheduler.step()
+    # Step scheduler based on validation loss
+    scheduler.step(avg_val_loss)
     
     if epoch % 15 == 0 or epoch == num_epochs - 1:
         print(f"Epoch {epoch+1}/{num_epochs} - Train Loss: {avg_train_loss:.4f}, Val Loss: {avg_val_loss:.4f}, LR: {optimizer.param_groups[0]['lr']:.6f}")
@@ -548,63 +600,77 @@ for epoch in range(num_epochs):
         best_val_loss = avg_val_loss
         torch.save(model.state_dict(), 'best_model_advanced.pth')
         patience_counter = 0
+        if epoch % 15 != 0:  # Print if not already printed
+            print(f"Epoch {epoch+1}/{num_epochs} - ✓ New best validation loss: {avg_val_loss:.4f}")
     else:
         patience_counter += 1
         if patience_counter >= patience:
-            print(f"Early stopping at epoch {epoch+1}")
+            print(f"\nEarly stopping triggered at epoch {epoch+1}")
+            print(f"Best validation loss: {best_val_loss:.4f}")
             break
     
 # Load best model
+print("\nLoading best model from checkpoint...")
 model.load_state_dict(torch.load('best_model_advanced.pth'))
+print("✓ Best model loaded")
 
 # Move tensors to device for evaluation
+X_val_tensor = X_val_tensor.to(device)
+y_val_tensor = y_val_tensor.to(device)
 X_test_tensor = X_test_tensor.to(device)
 y_test_tensor = y_test_tensor.to(device)
+
+print("\n" + "="*60)
+print("TRAINING COMPLETE - ANALYZING RESULTS")
+print("="*60)
 
 # Plot training curves
 plt.figure(figsize=(12, 5))
 plt.subplot(1, 2, 1)
-plt.plot(train_losses, label='Train Loss')
-plt.plot(val_losses, label='Validation Loss')
+plt.plot(train_losses, label='Train Loss', alpha=0.8)
+plt.plot(val_losses, label='Validation Loss', alpha=0.8)
 plt.xlabel('Epoch')
 plt.ylabel('Loss')
-plt.title('Training and Validation Loss')
+plt.title('Training and Validation Loss\n(Validation = Separate held-out set)')
 plt.legend()
-plt.grid(True)
+plt.grid(True, alpha=0.3)
 
-# Test different thresholds for optimal performance
+# Test different thresholds for optimal performance ON VALIDATION SET
+print("\nFinding optimal classification threshold using VALIDATION set...")
 thresholds = np.arange(0.3, 0.8, 0.05)
 best_threshold = 0.5
 best_f1 = 0
 
 model.eval()
 with torch.no_grad():
-    all_outputs = model(X_test_tensor)
-    all_probabilities = torch.sigmoid(all_outputs).cpu().numpy()
-    y_true = y_test_tensor.cpu().numpy()
+    val_outputs = model(X_val_tensor)
+    val_probabilities = torch.sigmoid(val_outputs).cpu().numpy()
+    y_val_true = y_val_tensor.cpu().numpy()
 
 f1_scores = []
 for threshold in thresholds:
-    predictions = (all_probabilities > threshold).astype(int)
-    f1 = f1_score(y_true, predictions)
+    predictions = (val_probabilities > threshold).astype(int)
+    f1 = f1_score(y_val_true, predictions)
     f1_scores.append(f1)
     if f1 > best_f1:
         best_f1 = f1
         best_threshold = threshold
+
+print(f"  Best threshold: {best_threshold:.2f} with F1 score: {best_f1:.4f}")
 
 plt.subplot(1, 2, 2)
 plt.plot(thresholds, f1_scores, 'b-o')
 plt.axvline(x=best_threshold, color='r', linestyle='--', label=f'Best threshold: {best_threshold:.2f}')
 plt.xlabel('Threshold')
 plt.ylabel('F1 Score')
-plt.title('F1 Score vs Threshold')
+plt.title('F1 Score vs Threshold\n(Optimized on Validation set)')
 plt.legend()
-plt.grid(True)
+plt.grid(True, alpha=0.3)
 plt.tight_layout()
 plt.savefig('training_analysis.png', dpi=300, bbox_inches='tight')
 plt.show()
 
-print(f"Best threshold: {best_threshold:.2f} with F1 score: {best_f1:.4f}")
+print("\n✓ Training curves saved to 'training_analysis.png'")
 
 def evaluate_model_advanced(model, X_test_tensor, y_test_tensor, threshold=0.5, device='cpu'):
     model.eval()
@@ -719,15 +785,22 @@ def evaluate_model_advanced(model, X_test_tensor, y_test_tensor, threshold=0.5, 
         
         return acc, precision, recall, f1, auroc, pr_auc, mcc, brier, metrics_dict
 
-# Evaluate with default threshold
-print("\n" + "="*60)
+# ============================================================================
+# FINAL EVALUATION ON TEST SET (USED ONLY ONCE!)
+# ============================================================================
+print("\n" + "="*70)
 print("FINAL MODEL EVALUATION ON SPATIALLY SEPARATED TEST SET")
-print("="*60)
-print("\n=== Evaluation with default threshold (0.5) ===")        
+print("="*70)
+print("\n⚠️  IMPORTANT: This is the FIRST and ONLY time we're evaluating on the test set!")
+print("   The test set was locked away during training and hyperparameter tuning.")
+print("   These metrics represent true generalization to unseen geographic areas.\n")
+
+print("=== Evaluation with default threshold (0.5) ===")        
 results_default = evaluate_model_advanced(model, X_test_tensor, y_test_tensor, threshold=0.5, device=device)
 
-# Evaluate with optimized threshold
+# Evaluate with optimized threshold (tuned on validation set)
 print(f"\n=== Evaluation with optimized threshold ({best_threshold:.3f}) ===")
+print(f"   (Note: Threshold was optimized on VALIDATION set, not test set)")
 results_optimized = evaluate_model_advanced(model, X_test_tensor, y_test_tensor, threshold=best_threshold, device=device)
 
 # Save final metrics to CSV
