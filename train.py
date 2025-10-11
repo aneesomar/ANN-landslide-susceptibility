@@ -212,11 +212,13 @@ try:
     script_dir = os.path.dirname(os.path.abspath(__file__))
     
     model_paths = [
+        os.path.join(script_dir, "models", "landslide_model_advanced_complete.pth"),  # models/ subdirectory relative to script
         os.path.join(script_dir, "landslide_model_advanced_complete.pth"),  # Same dir as script
         "landslide_model_advanced_complete.pth",  # Current working directory
-        "../landslide_model_advanced_complete.pth",  # Parent directory
-        "./landslide_model_advanced_complete.pth",  # Explicit current dir
-        "ANN-landslide-susceptibility/landslide_model_advanced_complete.pth"  # From parent
+        "models/landslide_model_advanced_complete.pth",  # models subdirectory from cwd
+        "./models/landslide_model_advanced_complete.pth",  # Explicit current dir
+        "../models/landslide_model_advanced_complete.pth",  # Parent directory
+        "ANN-landslide-susceptibility/models/landslide_model_advanced_complete.pth"  # From parent
     ]
     
     model_file = None
