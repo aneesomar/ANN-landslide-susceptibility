@@ -29,7 +29,7 @@ print("="*80)
 print("\n1. Loading data...")
 
 # Load susceptibility map
-with rasterio.open('susceptibility_map_corrected.tif') as src:
+with rasterio.open('susceptibility_map.tif') as src:
     susceptibility = src.read(1)
     transform = src.transform
     print(f"   ✓ Susceptibility map loaded: {src.width} × {src.height} pixels")
