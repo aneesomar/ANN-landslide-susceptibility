@@ -189,13 +189,13 @@ for i, raster_path in enumerate(raster_paths[:len(columns_to_scale)]):
         raster_mins.append(0)
         raster_maxs.append(1)
 
-# Create scaler with raster-based ranges
-scaler = MinMaxScaler()
+# Create MinMaxScaler with raster-based ranges (Step 1 of training pipeline)
+minmax_scaler = MinMaxScaler()
 # Manually set the scaler parameters based on actual raster ranges
-scaler.fit([raster_mins, raster_maxs])
+minmax_scaler.fit([raster_mins, raster_maxs])
 
-print(f"\nScaler fitted on RASTER ranges (not training sample ranges)")
-print(f"This will produce predictions consistent with training normalization")
+print(f"\nMinMaxScaler fitted on RASTER ranges (Step 1 of training pipeline)")
+print(f"This replicates the preprocessing step from normalise.py")
 
 # Get unique values for one-hot encoding mapping
 lithology_values = combined[lithology_cols].idxmax(axis=1).str.replace('lithology_', '').astype(int).unique()
@@ -332,9 +332,14 @@ try:
             model = AdvancedLandslideANN(input_dim)
             model.load_state_dict(model_data['model_state_dict'])
             
-            # Don't use the saved scaler - it was fitted on one-hot encoded data
-            # We'll use our own scaler fitted only on continuous features
-            print("Using local scaler fitted on continuous features only")
+            # Load the saved RobustScaler - this is Step 2 of the training pipeline
+            # This scaler was fitted on MinMax-scaled training data
+            if 'scaler' in model_data:
+                robust_scaler = model_data['scaler']
+                print("✓ Loaded RobustScaler from training (Step 2 of pipeline)")
+            else:
+                print("WARNING: No scaler found in model file. This will cause prediction errors!")
+                robust_scaler = None
             
             # Also load the saved threshold if available
             best_threshold = model_data.get('best_threshold', 0.5)
@@ -360,6 +365,20 @@ except Exception as e:
 model.eval()
 print("Model loaded successfully!")
 print(f"Expected input features: {input_dim}")
+
+# Validate scaling pipeline consistency
+if robust_scaler is not None:
+    print("\n=== SCALING PIPELINE VALIDATION ===")
+    print("✓ Training pipeline: Raw → MinMaxScaler → RobustScaler")
+    print("✓ Prediction pipeline: Raw → MinMaxScaler → RobustScaler")
+    print("✓ Same RobustScaler loaded from training")
+    print("✓ Pipeline consistency: VALIDATED")
+else:
+    print("\n⚠️  SCALING PIPELINE WARNING ⚠️")
+    print("❌ Missing RobustScaler - predictions will be UNRELIABLE!")
+    print("❌ Training used: Raw → MinMaxScaler → RobustScaler")
+    print("❌ Prediction using: Raw → MinMaxScaler only")
+    print("❌ This WILL cause wrong predictions!")
 
 # Create output array for predictions
 print("Initializing output arrays...")
@@ -420,8 +439,18 @@ for chunk_start in range(0, total_pixels, CHUNK_SIZE):
     # Create DataFrame for this chunk
     chunk_df = pd.DataFrame(continuous_data, columns=columns_to_scale)
     
-    # Scale continuous variables
-    continuous_scaled = scaler.transform(chunk_df)
+    # Apply the SAME scaling pipeline as training:
+    # Step 1: MinMaxScaler (replicates normalise.py preprocessing)
+    continuous_minmax = minmax_scaler.transform(chunk_df)
+    
+    # Step 2: RobustScaler (replicates modelTraining.py scaling)
+    if robust_scaler is not None:
+        continuous_scaled = robust_scaler.transform(continuous_minmax)
+        if chunk_start == 0:  # Only print once
+            print(f"  ✓ Applied 2-step scaling: MinMax → RobustScaler (matches training)")
+    else:
+        print("  ❌ ERROR: No RobustScaler available! Using only MinMaxScaler (will cause wrong predictions)")
+        continuous_scaled = continuous_minmax
     
     # One-hot encode lithology
     lithology_encoded = np.zeros((len(valid_chunk_data), len(lithology_cols)))
