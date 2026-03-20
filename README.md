@@ -23,8 +23,6 @@ Each point contains:
 - coordinates: `xcoord`, `ycoord`
 - optional identifier: `fid`
 
-The modelling workflow now avoids the earlier preprocessing leakage problem by fitting preprocessing only on training data inside each split or fold.
-
 ## Repository Layout
 
 ```text
@@ -65,14 +63,14 @@ ANN-landslide-susceptibility/
 
 Place the original point tables in one of the supported locations, preferably:
 
-- [data/processed/landslides.csv](/home/anees/personal_projects/ANN-landslide-susceptibility/data/processed/landslides.csv)
-- [data/processed/non_landslides.csv](/home/anees/personal_projects/ANN-landslide-susceptibility/data/processed/non_landslides.csv)
+- `data/processed/landslides.csv`
+- `data/processed/non_landslides.csv`
 
 These raw files should contain the unnormalized continuous predictors and integer `lithology` and `soil` classes.
 
 ### Raster stack for map prediction
 
-Place the aligned rasters in [alignedRaster](/home/anees/personal_projects/ANN-landslide-susceptibility/alignedRaster) using these names:
+Place the aligned rasters in `alignedRaster/` using these names:
 
 - `aspect_utm15_aligned.tif`
 - `elv_aligned.tif`
@@ -103,20 +101,7 @@ If you already use Conda or another environment manager, that is also fine as lo
 
 ## How To Run
 
-### 1. Optional legacy export helper
-
-```bash
-python normalise.py
-```
-
-This script no longer performs modelling normalization. It only creates one-hot encoded legacy exports:
-
-- `data/processed/output_landslides.csv`
-- `data/processed/output_non_landslides.csv`
-
-These are kept mainly for inspection or compatibility. The training and benchmark scripts do not rely on global normalization from this file anymore.
-
-### 2. Train the ANN
+### 1. Train the ANN
 
 ```bash
 python modelTraining.py
@@ -124,37 +109,37 @@ python modelTraining.py
 
 This produces:
 
-- model package: [models/landslide_model_advanced_complete.pth](/home/anees/personal_projects/ANN-landslide-susceptibility/models/landslide_model_advanced_complete.pth)
-- best checkpoint: [models/best_model_advanced.pth](/home/anees/personal_projects/ANN-landslide-susceptibility/models/best_model_advanced.pth)
-- metrics and plots in [results/training](/home/anees/personal_projects/ANN-landslide-susceptibility/results/training)
+- model package: `models/landslide_model_advanced_complete.pth`
+- best checkpoint: `models/best_model_advanced.pth`
+- metrics and plots in `results/training/`
 
 Main outputs include:
 
-- [training_summary.json](/home/anees/personal_projects/ANN-landslide-susceptibility/results/training/training_summary.json)
-- [final_test_metrics.csv](/home/anees/personal_projects/ANN-landslide-susceptibility/results/training/final_test_metrics.csv)
-- [selected_feature_importance.csv](/home/anees/personal_projects/ANN-landslide-susceptibility/results/training/selected_feature_importance.csv)
+- `results/training/training_summary.json`
+- `results/training/final_test_metrics.csv`
+- `results/training/selected_feature_importance.csv`
 - `advanced_evaluation.png`
 - `advanced_validation_evaluation.png`
 - `feature_importance_advanced.png`
 - `training_analysis.png`
 
-### 3. Run the spatial benchmark comparison
+### 2. Run the spatial benchmark comparison
 
 ```bash
 python benchmark_spatial_models.py
 ```
 
-This runs ANN, RF, and GB under the same 5-fold spatial block cross-validation framework and writes outputs to [results/benchmark](/home/anees/personal_projects/ANN-landslide-susceptibility/results/benchmark).
+This runs ANN, RF, and GB under the same 5-fold spatial block cross-validation framework and writes outputs to `results/benchmark/`.
 
 Main outputs include:
 
-- [benchmark_results_detailed.csv](/home/anees/personal_projects/ANN-landslide-susceptibility/results/benchmark/benchmark_results_detailed.csv)
-- [benchmark_results_summary.csv](/home/anees/personal_projects/ANN-landslide-susceptibility/results/benchmark/benchmark_results_summary.csv)
-- [benchmark_fold_assignments.csv](/home/anees/personal_projects/ANN-landslide-susceptibility/results/benchmark/benchmark_fold_assignments.csv)
-- [benchmark_fold_features.csv](/home/anees/personal_projects/ANN-landslide-susceptibility/results/benchmark/benchmark_fold_features.csv)
-- [benchmark_metadata.json](/home/anees/personal_projects/ANN-landslide-susceptibility/results/benchmark/benchmark_metadata.json)
+- `results/benchmark/benchmark_results_detailed.csv`
+- `results/benchmark/benchmark_results_summary.csv`
+- `results/benchmark/benchmark_fold_assignments.csv`
+- `results/benchmark/benchmark_fold_features.csv`
+- `results/benchmark/benchmark_metadata.json`
 
-### 4. Generate the susceptibility map
+### 3. Generate the susceptibility map
 
 ```bash
 python train.py
@@ -162,15 +147,15 @@ python train.py
 
 This loads the saved ANN model package and applies it to the aligned raster stack. The output map is written to:
 
-- [results/susceptibility_maps/susceptibility_map.tif](/home/anees/personal_projects/ANN-landslide-susceptibility/results/susceptibility_maps/susceptibility_map.tif)
+- `results/susceptibility_maps/susceptibility_map.tif`
 
-### 5. Optional transfer learning experiment
+### 4. Optional transfer learning experiment
 
 ```bash
 python transfer_learning_durban.py
 ```
 
-This evaluates the trained Chiapas model on the Durban dataset and writes outputs to [results/transfer_learning](/home/anees/personal_projects/ANN-landslide-susceptibility/results/transfer_learning).
+This evaluates the trained Chiapas model on the Durban dataset and writes outputs to `results/transfer_learning/`.
 
 ## Detailed Pipeline
 
@@ -201,7 +186,7 @@ In the current dataset, 25 blocks were requested but only 19 were populated stro
 
 ## 3. Leakage-Safe Preprocessing
 
-The shared preprocessing logic lives in [preprocessing.py](/home/anees/personal_projects/ANN-landslide-susceptibility/preprocessing.py).
+The shared preprocessing logic lives in `preprocessing.py`.
 
 For each training split or outer fold:
 
@@ -241,7 +226,7 @@ This makes the ANN less sensitive to outliers after the initial training-only mi
 
 ## 6. ANN Training Workflow
 
-The ANN is defined in [modelTraining.py](/home/anees/personal_projects/ANN-landslide-susceptibility/modelTraining.py) as `ImprovedLandslideANN`.
+The ANN is defined in `modelTraining.py` as `ImprovedLandslideANN`.
 
 Training uses:
 
@@ -267,7 +252,7 @@ The workflow is:
 
 ## 7. Benchmark Workflow
 
-The benchmark comparison in [benchmark_spatial_models.py](/home/anees/personal_projects/ANN-landslide-susceptibility/benchmark_spatial_models.py) is designed to compare ANN, RF, and GB under the same spatial framework.
+The benchmark comparison in `benchmark_spatial_models.py` is designed to compare ANN, RF, and GB under the same spatial framework.
 
 For each outer fold:
 
@@ -303,7 +288,7 @@ The saved ANN model package includes:
 - best validation threshold
 - metadata about training metrics and package versions
 
-This allows [train.py](/home/anees/personal_projects/ANN-landslide-susceptibility/train.py) to apply the same learned preprocessing logic during raster inference.
+This allows `train.py` to apply the same learned preprocessing logic during raster inference.
 
 ## 9. Raster Prediction Workflow
 
@@ -328,13 +313,13 @@ The previous hand-tuned edge correction has been removed so the susceptibility m
 
 The ANN training summary is stored in:
 
-- [results/training/training_summary.json](/home/anees/personal_projects/ANN-landslide-susceptibility/results/training/training_summary.json)
+- `results/training/training_summary.json`
 
 ### Benchmark outputs
 
 The model comparison summary is stored in:
 
-- [results/benchmark/benchmark_results_summary.csv](/home/anees/personal_projects/ANN-landslide-susceptibility/results/benchmark/benchmark_results_summary.csv)
+- `results/benchmark/benchmark_results_summary.csv`
 
 This is the main file to cite when comparing ANN, RF, and GB for the manuscript.
 
@@ -342,7 +327,7 @@ This is the main file to cite when comparing ANN, RF, and GB for the manuscript.
 
 The raster probability map is stored in:
 
-- [results/susceptibility_maps/susceptibility_map.tif](/home/anees/personal_projects/ANN-landslide-susceptibility/results/susceptibility_maps/susceptibility_map.tif)
+- `results/susceptibility_maps/susceptibility_map.tif`
 
 ## Reproducibility Notes
 
@@ -368,8 +353,4 @@ Optional:
 python transfer_learning_durban.py
 ```
 
-## Notes
 
-- `normalise.py` is now a legacy export helper, not part of the core modelling pipeline
-- the benchmark results should be preferred over a single holdout test when writing the comparative manuscript section
-- if you rerun training, you should rerun benchmarking so the reported ANN package and benchmark comparison stay aligned
