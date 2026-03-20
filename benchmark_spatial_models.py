@@ -21,11 +21,13 @@ from sklearn.utils.class_weight import compute_sample_weight
 from torch.utils.data import DataLoader, TensorDataset
 
 from modelTraining import ImprovedLandslideANN
+from modelTraining import MAX_SELECTED_FEATURES, select_features
+from preprocessing import fit_transform_preprocessor, transform_with_preprocessor
 from project_paths import (
     BENCHMARK_RESULTS_DIR,
     MODELS_DIR,
     ensure_project_dirs,
-    resolve_processed_csvs,
+    resolve_raw_csvs,
 )
 
 
@@ -41,7 +43,7 @@ ANN_PATIENCE = 10
 
 
 def resolve_csvs():
-    return resolve_processed_csvs()
+    return resolve_raw_csvs()
 
 
 def create_spatial_blocks(coords, n_blocks=25):
@@ -252,10 +254,6 @@ def evaluate_ann_on_fold(X_train, y_train, train_groups, X_test, y_test):
 
 def main():
     landslide_csv, non_landslide_csv = resolve_csvs()
-    model_package = torch.load(MODEL_PACKAGE_PATH, weights_only=False)
-    selected_features = model_package.get("selected_features")
-    if not selected_features:
-        raise ValueError("Model package does not contain selected_features")
 
     landslides = pd.read_csv(landslide_csv)
     non_landslides = pd.read_csv(non_landslide_csv)
@@ -265,49 +263,56 @@ def main():
     full_data = pd.concat([landslides, non_landslides], ignore_index=True)
     full_data = full_data.sample(frac=1, random_state=SEED).reset_index(drop=True)
 
-    X = full_data.drop(columns=["label"]).replace({True: 1, False: 0})
-    X = X.apply(pd.to_numeric, errors="coerce").fillna(0)
+    X_raw = full_data.drop(columns=["label"]).replace({True: 1, False: 0})
+    X_raw = X_raw.apply(pd.to_numeric, errors="coerce").fillna(0)
     y = full_data["label"].astype(int)
-    coordinates = X[["xcoord", "ycoord"]].copy()
-    X = X.drop(columns=["xcoord", "ycoord", "fid"], errors="ignore")
-
-    available_selected_features = [feature for feature in selected_features if feature in X.columns]
-    if not available_selected_features:
-        raise ValueError("None of the selected features from the model package were found in the benchmark dataset")
-
-    X = X[available_selected_features].copy()
+    coordinates = X_raw[["xcoord", "ycoord"]].copy()
     block_ids = create_spatial_blocks(coordinates, n_blocks=N_BLOCKS)
     block_summary = pd.DataFrame({"block": block_ids, "label": y}).groupby("block")["label"].agg(["count", "mean"])
     valid_blocks = block_summary[block_summary["count"] >= MIN_BLOCK_SIZE].index.to_numpy()
     valid_mask = np.isin(block_ids, valid_blocks)
 
-    X = X.loc[valid_mask].reset_index(drop=True)
+    X_raw = X_raw.loc[valid_mask].reset_index(drop=True)
     y = y.loc[valid_mask].reset_index(drop=True)
     block_ids = block_ids[valid_mask]
     coordinates = coordinates.loc[valid_mask].reset_index(drop=True)
 
-    print(f"Benchmark dataset shape: {X.shape}")
-    print(f"Using {len(available_selected_features)} selected features from the ANN model package")
+    print(f"Benchmark dataset shape: {X_raw.shape}")
+    print("Using fold-specific training-only preprocessing and feature selection")
     print(f"Using {len(np.unique(block_ids))} populated spatial blocks")
 
     fold_assignment_rows = []
     detailed_rows = []
+    fold_feature_rows = []
     gkf = GroupKFold(n_splits=5)
 
-    for fold_index, (train_idx, test_idx) in enumerate(gkf.split(X, y, groups=block_ids), start=1):
-        X_train = X.iloc[train_idx].reset_index(drop=True)
+    for fold_index, (train_idx, test_idx) in enumerate(gkf.split(X_raw, y, groups=block_ids), start=1):
+        X_train_raw = X_raw.iloc[train_idx].reset_index(drop=True)
         y_train = y.iloc[train_idx].reset_index(drop=True)
-        X_test = X.iloc[test_idx].reset_index(drop=True)
+        X_test_raw = X_raw.iloc[test_idx].reset_index(drop=True)
         y_test = y.iloc[test_idx].reset_index(drop=True)
         train_groups = block_ids[train_idx]
         test_groups = block_ids[test_idx]
 
         print(f"\nFold {fold_index}/5")
-        print(f"  Train samples: {len(X_train):,}, positive rate={y_train.mean():.3f}")
-        print(f"  Test samples:  {len(X_test):,}, positive rate={y_test.mean():.3f}")
+        print(f"  Train samples: {len(X_train_raw):,}, positive rate={y_train.mean():.3f}")
+        print(f"  Test samples:  {len(X_test_raw):,}, positive rate={y_test.mean():.3f}")
 
         for block in np.unique(test_groups):
             fold_assignment_rows.append({"fold": fold_index, "block": int(block)})
+
+        X_train_engineered, preprocessor = fit_transform_preprocessor(X_train_raw)
+        X_test_engineered = transform_with_preprocessor(X_test_raw, preprocessor)
+        selected_features, _ = select_features(
+            X_train_engineered,
+            y_train,
+            max_features=MAX_SELECTED_FEATURES,
+        )
+        X_train = X_train_engineered[selected_features].copy()
+        X_test = X_test_engineered[selected_features].copy()
+
+        for feature in selected_features:
+            fold_feature_rows.append({"fold": fold_index, "feature": feature})
 
         ann_metrics, ann_inner_seed = evaluate_ann_on_fold(X_train, y_train, train_groups, X_test, y_test)
         ann_metrics["model"] = "ANN"
@@ -354,19 +359,22 @@ def main():
     )
 
     fold_assignment_df = pd.DataFrame(fold_assignment_rows).sort_values(["fold", "block"])
+    fold_features_df = pd.DataFrame(fold_feature_rows).sort_values(["fold", "feature"])
     detailed_path = BENCHMARK_RESULTS_DIR / "benchmark_results_detailed.csv"
     summary_path = BENCHMARK_RESULTS_DIR / "benchmark_results_summary.csv"
     folds_path = BENCHMARK_RESULTS_DIR / "benchmark_fold_assignments.csv"
+    fold_features_path = BENCHMARK_RESULTS_DIR / "benchmark_fold_features.csv"
     metadata_path = BENCHMARK_RESULTS_DIR / "benchmark_metadata.json"
 
     detailed_df.to_csv(detailed_path, index=False)
     summary_df.to_csv(summary_path)
     fold_assignment_df.to_csv(folds_path, index=False)
+    fold_features_df.to_csv(fold_features_path, index=False)
 
     metadata = {
-        "feature_source": str(MODEL_PACKAGE_PATH),
-        "num_features": len(available_selected_features),
-        "features": available_selected_features,
+        "feature_source": "training_only_selection_per_outer_fold",
+        "max_selected_features": MAX_SELECTED_FEATURES,
+        "predictor_family": "12 continuous predictors + one-hot lithology + one-hot soil",
         "landslide_csv": str(landslide_csv),
         "non_landslide_csv": str(non_landslide_csv),
         "n_blocks_requested": N_BLOCKS,
@@ -381,6 +389,7 @@ def main():
     print(f"  Detailed fold metrics: {detailed_path}")
     print(f"  Summary metrics:       {summary_path}")
     print(f"  Fold assignments:      {folds_path}")
+    print(f"  Fold features:         {fold_features_path}")
     print(f"  Metadata:              {metadata_path}")
 
 

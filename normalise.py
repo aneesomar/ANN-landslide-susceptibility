@@ -1,19 +1,29 @@
 import pandas as pd
-from sklearn.preprocessing import MinMaxScaler
-from project_paths import PROCESSED_DATA_DIR, ensure_project_dirs
 
-# Load the datasets
-landslides = pd.read_csv("landslides.csv")
-nonLandslides = pd.read_csv("non_landslides.csv")
-ensure_project_dirs()
+from project_paths import PROCESSED_DATA_DIR, ensure_project_dirs, resolve_raw_csvs
 
-scaler = MinMaxScaler()
-columns_to_scale = ['aspect', 'elv', 'flowAcc', 'planCurv', 'profCurv', 'riverProx', 'roadProx', 'slope', 'SPI', 'TPI', 'TRI', 'TWI']  # add all your continuous variables
-landslides[columns_to_scale] = scaler.fit_transform(landslides[columns_to_scale])
-nonLandslides[columns_to_scale] = scaler.transform(nonLandslides[columns_to_scale])
 
-landslides = pd.get_dummies(landslides, columns=['lithology', 'soil'])
-nonLandslides = pd.get_dummies(nonLandslides, columns=['lithology', 'soil'])
+def main():
+    ensure_project_dirs()
+    landslide_path, non_landslide_path = resolve_raw_csvs()
+    landslides = pd.read_csv(landslide_path)
+    non_landslides = pd.read_csv(non_landslide_path)
 
-landslides.to_csv(PROCESSED_DATA_DIR / "output_landslides.csv", index=False)
-nonLandslides.to_csv(PROCESSED_DATA_DIR / "output_non_landslides.csv", index=False)
+    # This script is now a legacy export helper only.
+    # Model training and benchmarking perform scaling inside each training fold.
+    landslides_export = pd.get_dummies(landslides, columns=["lithology", "soil"])
+    non_landslides_export = pd.get_dummies(non_landslides, columns=["lithology", "soil"])
+
+    landslide_output = PROCESSED_DATA_DIR / "output_landslides.csv"
+    non_landslide_output = PROCESSED_DATA_DIR / "output_non_landslides.csv"
+    landslides_export.to_csv(landslide_output, index=False)
+    non_landslides_export.to_csv(non_landslide_output, index=False)
+
+    print("Saved legacy one-hot encoded exports for inspection only:")
+    print(f"  {landslide_output}")
+    print(f"  {non_landslide_output}")
+    print("No normalization was applied here. Training and benchmarking now scale inside each training split.")
+
+
+if __name__ == "__main__":
+    main()

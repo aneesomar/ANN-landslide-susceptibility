@@ -14,7 +14,6 @@ venv/
 *.pb
 
 # Data files (uncomment if you don't want to track large data files)
-*.csv
 *.tif
 *.tiff
 *.png

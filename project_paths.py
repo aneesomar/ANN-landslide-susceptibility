@@ -28,11 +28,36 @@ def ensure_project_dirs():
         directory.mkdir(parents=True, exist_ok=True)
 
 
+def resolve_raw_csvs():
+    candidates = [
+        (
+            PROCESSED_DATA_DIR / "landslides.csv",
+            PROCESSED_DATA_DIR / "non_landslides.csv",
+        ),
+        (
+            DATA_DIR / "landslides.csv",
+            DATA_DIR / "non_landslides.csv",
+        ),
+        (
+            PROJECT_ROOT / "landslides.csv",
+            PROJECT_ROOT / "non_landslides.csv",
+        ),
+    ]
+    for landslide_path, non_landslide_path in candidates:
+        if landslide_path.exists() and non_landslide_path.exists():
+            return landslide_path, non_landslide_path
+    raise FileNotFoundError("Could not find raw landslides.csv and non_landslides.csv")
+
+
 def resolve_processed_csvs():
     candidates = [
         (
             PROCESSED_DATA_DIR / "output_landslides.csv",
             PROCESSED_DATA_DIR / "output_non_landslides.csv",
+        ),
+        (
+            PROCESSED_DATA_DIR / "landslides.csv",
+            PROCESSED_DATA_DIR / "non_landslides.csv",
         ),
         (
             PROJECT_ROOT / "output_landslides.csv",

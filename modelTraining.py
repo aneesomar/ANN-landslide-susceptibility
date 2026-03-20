@@ -29,11 +29,12 @@ from sklearn.model_selection import GroupKFold, GroupShuffleSplit
 from sklearn.preprocessing import RobustScaler
 from sklearn.utils.class_weight import compute_class_weight
 from torch.utils.data import DataLoader, TensorDataset
+from preprocessing import fit_transform_preprocessor, transform_with_preprocessor
 from project_paths import (
     MODELS_DIR,
     TRAINING_RESULTS_DIR,
     ensure_project_dirs,
-    resolve_processed_csvs,
+    resolve_raw_csvs,
 )
 
 
@@ -55,7 +56,7 @@ np.random.seed(SEED)
 
 
 def resolve_csvs():
-    return resolve_processed_csvs()
+    return resolve_raw_csvs()
 
 
 def create_spatial_blocks(coords, n_blocks=25):
@@ -328,13 +329,12 @@ def main():
     full_data = pd.concat([landslides, non_landslides], ignore_index=True)
     full_data = full_data.sample(frac=1, random_state=SEED).reset_index(drop=True)
 
-    X = full_data.drop(columns=["label"]).replace({True: 1, False: 0})
-    X = X.apply(pd.to_numeric, errors="coerce").fillna(0)
+    X_raw = full_data.drop(columns=["label"]).replace({True: 1, False: 0})
+    X_raw = X_raw.apply(pd.to_numeric, errors="coerce").fillna(0)
     y = full_data["label"].astype(int)
-    coordinates = X[["xcoord", "ycoord"]].copy()
-    X = X.drop(columns=["xcoord", "ycoord", "fid"], errors="ignore")
+    coordinates = X_raw[["xcoord", "ycoord"]].copy()
 
-    print(f"Dataset shape: {X.shape}")
+    print(f"Dataset shape: {X_raw.shape}")
     print(f"Positive class rate: {y.mean():.3f}")
     print(
         f"Coordinate ranges: X({coordinates['xcoord'].min():.0f} to {coordinates['xcoord'].max():.0f}), "
@@ -346,36 +346,36 @@ def main():
     valid_blocks = block_summary[block_summary["count"] >= MIN_BLOCK_SIZE].index.to_numpy()
     valid_mask = np.isin(block_ids, valid_blocks)
 
-    X_spatial = X.loc[valid_mask].reset_index(drop=True)
+    X_spatial_raw = X_raw.loc[valid_mask].reset_index(drop=True)
     y_spatial = y.loc[valid_mask].reset_index(drop=True)
     coordinates_spatial = coordinates.loc[valid_mask].reset_index(drop=True)
     block_ids_spatial = block_ids[valid_mask]
 
-    print(f"Keeping {len(X_spatial):,}/{len(X):,} samples in blocks with >= {MIN_BLOCK_SIZE} samples")
-    print(f"Spatial dataset shape: {X_spatial.shape}")
+    print(f"Keeping {len(X_spatial_raw):,}/{len(X_raw):,} samples in blocks with >= {MIN_BLOCK_SIZE} samples")
+    print(f"Spatial dataset shape: {X_spatial_raw.shape}")
 
     trainval_idx, test_idx, trainval_rate, test_rate, test_seed = find_balanced_group_split(
-        X_spatial,
+        X_spatial_raw,
         y_spatial,
         block_ids_spatial,
         test_size=0.2,
     )
 
-    X_trainval = X_spatial.iloc[trainval_idx].reset_index(drop=True)
-    X_test = X_spatial.iloc[test_idx].reset_index(drop=True)
+    X_trainval_raw = X_spatial_raw.iloc[trainval_idx].reset_index(drop=True)
+    X_test_raw = X_spatial_raw.iloc[test_idx].reset_index(drop=True)
     y_trainval = y_spatial.iloc[trainval_idx].reset_index(drop=True)
     y_test = y_spatial.iloc[test_idx].reset_index(drop=True)
     trainval_blocks = block_ids_spatial[trainval_idx]
 
     train_idx, val_idx, train_rate, val_rate, val_seed = find_balanced_group_split(
-        X_trainval,
+        X_trainval_raw,
         y_trainval,
         trainval_blocks,
         test_size=0.25,
     )
 
-    X_train = X_trainval.iloc[train_idx].reset_index(drop=True)
-    X_val = X_trainval.iloc[val_idx].reset_index(drop=True)
+    X_train_raw = X_trainval_raw.iloc[train_idx].reset_index(drop=True)
+    X_val_raw = X_trainval_raw.iloc[val_idx].reset_index(drop=True)
     y_train = y_trainval.iloc[train_idx].reset_index(drop=True)
     y_val = y_trainval.iloc[val_idx].reset_index(drop=True)
     train_blocks = trainval_blocks[train_idx]
@@ -383,14 +383,22 @@ def main():
     print("\n=== Spatial Split Summary ===")
     print(f"Balanced test split seed: {test_seed}")
     print(f"Balanced validation split seed: {val_seed}")
-    print(f"Train:      {len(X_train):,} samples, landslide rate={y_train.mean():.3f}")
-    print(f"Validation: {len(X_val):,} samples, landslide rate={y_val.mean():.3f}")
-    print(f"Test:       {len(X_test):,} samples, landslide rate={y_test.mean():.3f}")
+    print(f"Train:      {len(X_train_raw):,} samples, landslide rate={y_train.mean():.3f}")
+    print(f"Validation: {len(X_val_raw):,} samples, landslide rate={y_val.mean():.3f}")
+    print(f"Test:       {len(X_test_raw):,} samples, landslide rate={y_test.mean():.3f}")
 
-    selected_features, selected_feature_importance = select_features(X_train, y_train, max_features=MAX_SELECTED_FEATURES)
-    X_train_sel = X_train[selected_features].copy()
-    X_val_sel = X_val[selected_features].copy()
-    X_test_sel = X_test[selected_features].copy()
+    X_train_engineered, preprocessor = fit_transform_preprocessor(X_train_raw)
+    X_val_engineered = transform_with_preprocessor(X_val_raw, preprocessor)
+    X_test_engineered = transform_with_preprocessor(X_test_raw, preprocessor)
+
+    selected_features, selected_feature_importance = select_features(
+        X_train_engineered,
+        y_train,
+        max_features=MAX_SELECTED_FEATURES,
+    )
+    X_train_sel = X_train_engineered[selected_features].copy()
+    X_val_sel = X_val_engineered[selected_features].copy()
+    X_test_sel = X_test_engineered[selected_features].copy()
 
     scaler = RobustScaler()
     X_train_scaled = pd.DataFrame(scaler.fit_transform(X_train_sel), columns=selected_features)
@@ -508,7 +516,7 @@ def main():
         y_test_tensor,
         threshold=best_threshold,
         split_name="Test Optimized",
-        save_plot_path=SCRIPT_DIR / "advanced_evaluation.png",
+        save_plot_path=TRAINING_RESULTS_DIR / "advanced_evaluation.png",
     )
 
     final_metrics_df = pd.DataFrame(
@@ -567,6 +575,7 @@ def main():
     metadata = {
         "model_state_dict": model.state_dict(),
         "scaler": scaler,
+        "preprocessor": preprocessor,
         "selected_features": selected_features,
         "best_threshold": best_threshold,
         "model_architecture": "ImprovedLandslideANN",
@@ -585,6 +594,8 @@ def main():
     torch.save(metadata, MODEL_PACKAGE_PATH)
     summary = {
         "model_path": str(MODEL_PACKAGE_PATH),
+        "landslide_csv": str(landslide_csv),
+        "non_landslide_csv": str(non_landslide_csv),
         "num_selected_features": len(selected_features),
         "best_threshold": best_threshold,
         "validation_metrics": val_metrics,
@@ -601,8 +612,7 @@ def main():
     print(f"Selected features: {len(selected_features)}")
     print(f"Best deployment threshold: {best_threshold:.3f}")
 
-    print("\nReminder: `train.py` still approximates the original MinMax scaling because the raw pre-normalization tables are not in this repo.")
-    print("The new model should be cleaner and less leakage-prone, but the susceptibility map quality still depends on preprocessing consistency.")
+    print("\nPreprocessing summary: raw predictors -> training-only MinMax -> training-only feature selection -> training-only RobustScaler.")
 
 
 if __name__ == "__main__":

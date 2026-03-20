@@ -12,13 +12,11 @@ from rasterio.windows import Window
 from project_paths import (
     SUSCEPTIBILITY_MAPS_DIR,
     ensure_project_dirs,
-    resolve_processed_csvs,
-    resolve_processed_landslide_csv,
+    resolve_model_package,
 )
 
 
 WINDOW_SIZE = 512
-EDGE_BUFFER = 50
 EXPECTED_RASTER_NAMES = [
     "aspect_utm15_aligned.tif",
     "elv_aligned.tif",
@@ -111,76 +109,9 @@ def iter_windows(width, height, window_size):
             )
 
 
-def resolve_training_csvs():
-    print("Loading training data to understand feature structure...")
-    landslides_path, non_landslides_path = resolve_processed_csvs()
-    print(f"  Found CSV files at: {landslides_path}")
-    landslides = pd.read_csv(landslides_path)
-    non_landslides = pd.read_csv(non_landslides_path)
-    return pd.concat([landslides, non_landslides], ignore_index=True)
-
-
-def resolve_landslide_csv_path():
-    return str(resolve_processed_landslide_csv())
-
-
-def recover_training_minmax(landslides_df, raster_paths):
-    print("\nRecovering original MinMax scaling from landslide training points...")
-    coords = list(zip(landslides_df["xcoord"].to_numpy(), landslides_df["ycoord"].to_numpy()))
-    recovered_mins = []
-    recovered_maxs = []
-
-    for column_name, raster_path in zip(CONTINUOUS_COLUMNS, raster_paths[: len(CONTINUOUS_COLUMNS)]):
-        with rasterio.open(raster_path) as src:
-            print(f"  Sampling {os.path.basename(raster_path)} for {column_name}...")
-            sampled = np.array([value[0] for value in src.sample(coords)], dtype=np.float32)
-
-        sampled = clean_raster_data(sampled, None)
-        normalized_values = pd.to_numeric(landslides_df[column_name], errors="coerce").to_numpy(dtype=np.float32)
-        valid_mask = ~np.isnan(sampled) & ~np.isnan(normalized_values)
-
-        if not valid_mask.any():
-            raise RuntimeError(
-                f"Could not recover scaler for {column_name}: no valid raster/training pairs"
-            )
-
-        raw_values = sampled[valid_mask]
-        min_value = float(raw_values.min())
-        max_value = float(raw_values.max())
-
-        if not np.isfinite(min_value) or not np.isfinite(max_value) or max_value <= min_value:
-            raise RuntimeError(
-                f"Could not recover scaler for {column_name}: invalid range {min_value}..{max_value}"
-            )
-
-        recovered_mins.append(min_value)
-        recovered_maxs.append(max_value)
-        print(f"    Recovered landslide-fit range: {min_value:.2f} to {max_value:.2f}")
-
-    return np.array(recovered_mins, dtype=np.float32), np.array(recovered_maxs, dtype=np.float32)
-
-
-def apply_recovered_minmax(values, mins, maxs):
-    denom = np.where((maxs - mins) == 0, 1.0, (maxs - mins))
-    return (values - mins) / denom
-
-
 def load_model():
     print("Loading trained model...")
-    model_paths = [
-        os.path.join(SCRIPT_DIR, "models", "landslide_model_advanced_complete.pth"),
-        os.path.join(SCRIPT_DIR, "landslide_model_advanced_complete.pth"),
-        os.path.join(os.getcwd(), "landslide_model_advanced_complete.pth"),
-        os.path.join(os.getcwd(), "models", "landslide_model_advanced_complete.pth"),
-        os.path.join(SCRIPT_DIR, "..", "models", "landslide_model_advanced_complete.pth"),
-    ]
-
-    model_file = next((path for path in model_paths if os.path.exists(path)), None)
-    if model_file is None:
-        raise FileNotFoundError(
-            f"Could not find landslide_model_advanced_complete.pth. Searched: {model_paths}"
-        )
-
+    model_file = str(resolve_model_package())
     print(f"  Found model at: {model_file}")
     model_data = torch.load(model_file, weights_only=False)
 
@@ -188,6 +119,7 @@ def load_model():
     selected_features = None
     best_threshold = 0.5
     input_dim = None
+    preprocessor = None
 
     if isinstance(model_data, dict):
         if "model" in model_data:
@@ -296,6 +228,7 @@ def load_model():
                 model = AdvancedLandslideANN(input_dim)
             model.load_state_dict(model_data["model_state_dict"])
             robust_scaler = model_data.get("scaler")
+            preprocessor = model_data.get("preprocessor")
             best_threshold = model_data.get("best_threshold", 0.5)
             selected_features = model_data.get("selected_features")
         else:
@@ -306,30 +239,7 @@ def load_model():
         model = model_data
 
     model.eval()
-    return model, robust_scaler, selected_features, best_threshold, input_dim
-
-
-def apply_edge_correction(scores, rows, cols, width, height):
-    near_edge_mask = (
-        (cols < EDGE_BUFFER)
-        | (cols >= width - EDGE_BUFFER)
-        | (rows < EDGE_BUFFER)
-        | (rows >= height - EDGE_BUFFER)
-    )
-
-    if not near_edge_mask.any():
-        return scores
-
-    adjusted_scores = scores.copy()
-    edge_scores = np.minimum(adjusted_scores[near_edge_mask], 0.7)
-    edge_rows = rows[near_edge_mask]
-    edge_cols = cols[near_edge_mask]
-    distances = np.minimum.reduce(
-        [edge_cols, edge_rows, width - 1 - edge_cols, height - 1 - edge_rows]
-    )
-    dampening = 0.5 + 0.5 * (distances / EDGE_BUFFER)
-    adjusted_scores[near_edge_mask] = edge_scores * dampening
-    return adjusted_scores
+    return model, robust_scaler, preprocessor, selected_features, best_threshold, input_dim
 
 
 def main():
@@ -353,32 +263,23 @@ def main():
     print(f"Total pixels to process: {total_pixels:,}")
     print(f"Processing in {total_windows:,} windows of up to {WINDOW_SIZE}x{WINDOW_SIZE}")
 
-    combined = resolve_training_csvs()
-    feature_cols = [col for col in combined.columns if col not in ["fid", "xcoord", "ycoord"]]
-    lithology_cols = [col for col in feature_cols if col.startswith("lithology_")]
-    soil_cols = [col for col in feature_cols if col.startswith("soil_")]
-
-    print(f"Expected feature columns ({len(feature_cols)} total)")
-    print(f"Lithology columns ({len(lithology_cols)}): {lithology_cols}")
-    print(f"Soil columns ({len(soil_cols)}): {soil_cols}")
-
     expected_raster_order = CONTINUOUS_COLUMNS + ["lithology", "soil"]
     if len(raster_paths) != len(expected_raster_order):
         raise ValueError(
             f"Found {len(raster_paths)} rasters but expected {len(expected_raster_order)}"
         )
 
-    landslide_csv_path = resolve_landslide_csv_path()
-    landslides_only = pd.read_csv(landslide_csv_path)
-    raster_mins, raster_maxs = recover_training_minmax(landslides_only, raster_paths)
-
-    model, robust_scaler, selected_features, best_threshold, input_dim = load_model()
+    model, robust_scaler, preprocessor, selected_features, best_threshold, input_dim = load_model()
     if robust_scaler is not None:
         print("Loaded RobustScaler from training")
     else:
         print("WARNING: No RobustScaler found in model file")
+    if preprocessor is None:
+        raise ValueError("Model package does not contain the saved training preprocessor")
 
-    feature_names = CONTINUOUS_COLUMNS + lithology_cols + soil_cols
+    lithology_cols = [f"lithology_{value}" for value in preprocessor["lithology_categories"]]
+    soil_cols = [f"soil_{value}" for value in preprocessor["soil_categories"]]
+    feature_names = list(preprocessor["feature_columns"])
     feature_name_to_index = {name: index for index, name in enumerate(feature_names)}
     if selected_features is not None:
         feature_indices = [
@@ -436,11 +337,10 @@ def main():
 
             if valid_mask.any():
                 valid_pixels = pixel_matrix[valid_mask]
-                continuous_scaled = apply_recovered_minmax(
-                    valid_pixels[:, : len(CONTINUOUS_COLUMNS)],
-                    raster_mins,
-                    raster_maxs,
-                )
+                mins = np.asarray(preprocessor["continuous_min"], dtype=np.float32)
+                maxs = np.asarray(preprocessor["continuous_max"], dtype=np.float32)
+                denom = np.where((maxs - mins) == 0, 1.0, (maxs - mins))
+                continuous_scaled = (valid_pixels[:, : len(CONTINUOUS_COLUMNS)] - mins) / denom
 
                 lithology_raw = valid_pixels[:, len(CONTINUOUS_COLUMNS)]
                 soil_raw = valid_pixels[:, len(CONTINUOUS_COLUMNS) + 1]
@@ -473,14 +373,6 @@ def main():
                 chunk_tensor = torch.tensor(chunk_features, dtype=torch.float32)
                 with torch.no_grad():
                     scores = torch.sigmoid(model(chunk_tensor)).cpu().numpy().flatten()
-
-                local_rows, local_cols = np.divmod(
-                    np.flatnonzero(valid_mask),
-                    int(window.width),
-                )
-                global_rows = local_rows + int(window.row_off)
-                global_cols = local_cols + int(window.col_off)
-                scores = apply_edge_correction(scores, global_rows, global_cols, width, height)
 
                 flat_prediction = prediction_window.reshape(-1)
                 flat_prediction[valid_mask] = scores.astype(np.float32)

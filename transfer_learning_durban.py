@@ -19,6 +19,7 @@ from sklearn.metrics import (accuracy_score, precision_score, recall_score, f1_s
 import matplotlib.pyplot as plt
 import seaborn as sns
 from pathlib import Path
+from preprocessing import transform_with_preprocessor
 from project_paths import TRANSFER_RESULTS_DIR, ensure_project_dirs, resolve_model_package
 import warnings
 warnings.filterwarnings('ignore')
@@ -110,6 +111,28 @@ class AdvancedLandslideANN(nn.Module):
         x = self.feature_layers(x)
         return self.output(x)
 
+
+class ImprovedLandslideANN(nn.Module):
+    def __init__(self, input_dim):
+        super().__init__()
+        self.network = nn.Sequential(
+            nn.Linear(input_dim, 128),
+            nn.BatchNorm1d(128),
+            nn.ReLU(),
+            nn.Dropout(0.30),
+            nn.Linear(128, 64),
+            nn.BatchNorm1d(64),
+            nn.ReLU(),
+            nn.Dropout(0.20),
+            nn.Linear(64, 32),
+            nn.ReLU(),
+            nn.Dropout(0.10),
+            nn.Linear(32, 1),
+        )
+
+    def forward(self, x):
+        return self.network(x)
+
 # ======================== Load Trained Model ========================
 
 print("\n1. Loading Chiapas-trained model...")
@@ -118,9 +141,11 @@ model_data = torch.load(model_path, map_location='cpu', weights_only=False)
 
 # Extract model components
 chiapas_scaler = model_data['scaler']
+chiapas_preprocessor = model_data['preprocessor']
 selected_features = model_data['selected_features']
 best_threshold = model_data.get('best_threshold', 0.5)
 input_dim = model_data['input_dim']
+model_architecture = model_data.get('model_architecture', 'AdvancedLandslideANN')
 
 print(f"   ✓ Model loaded: {model_path}")
 print(f"   ✓ Input features: {input_dim}")
@@ -129,7 +154,10 @@ print(f"   ✓ Features used: {len(selected_features)}")
 
 # Create and load model
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-model = AdvancedLandslideANN(input_dim)
+if model_architecture == 'ImprovedLandslideANN':
+    model = ImprovedLandslideANN(input_dim)
+else:
+    model = AdvancedLandslideANN(input_dim)
 model.load_state_dict(model_data['model_state_dict'])
 model = model.to(device)
 model.eval()
@@ -349,25 +377,7 @@ print(f"   ✓ Saved Durban data to '{durban_data_path}'")
 # ======================== Feature Engineering ========================
 
 print("\n8. Feature engineering (matching Chiapas preprocessing)...")
-
-# Handle categorical variables (lithology and soil)
-# One-hot encode them similar to training data
-print("   Processing lithology...")
-durban_lithology = durban_data['lithology'].astype(int)
-lithology_dummies = pd.get_dummies(durban_lithology, prefix='lithology')
-
-print("   Processing soil...")
-durban_soil = durban_data['soil'].astype(int)
-soil_dummies = pd.get_dummies(durban_soil, prefix='soil')
-
-# Get continuous features
-continuous_features = ['aspect', 'elv', 'flowAcc', 'planCurv', 'profCurv', 
-                       'riverProx', 'roadProx', 'slope', 'SPI', 'TPI', 'TRI', 'TWI']
-durban_continuous = durban_data[continuous_features].copy()
-
-# Combine all features
-durban_engineered = pd.concat([durban_continuous, lithology_dummies, soil_dummies], axis=1)
-
+durban_engineered = transform_with_preprocessor(durban_data, chiapas_preprocessor)
 print(f"   ✓ Engineered features: {durban_engineered.shape[1]} total")
 
 # ======================== Match Features to Training Model ========================
@@ -375,7 +385,7 @@ print(f"   ✓ Engineered features: {durban_engineered.shape[1]} total")
 print("\n9. Aligning Durban features with Chiapas model features...")
 
 # Create a dataframe with all training features, filled with zeros
-aligned_features = pd.DataFrame(0, index=durban_engineered.index, columns=selected_features)
+aligned_features = pd.DataFrame(0.0, index=durban_engineered.index, columns=selected_features)
 
 # Fill in features that exist in Durban data
 for col in durban_engineered.columns:
