@@ -1,9 +1,11 @@
 import pandas as pd
 from sklearn.preprocessing import MinMaxScaler
+from project_paths import PROCESSED_DATA_DIR, ensure_project_dirs
 
 # Load the datasets
 landslides = pd.read_csv("landslides.csv")
 nonLandslides = pd.read_csv("non_landslides.csv")
+ensure_project_dirs()
 
 scaler = MinMaxScaler()
 columns_to_scale = ['aspect', 'elv', 'flowAcc', 'planCurv', 'profCurv', 'riverProx', 'roadProx', 'slope', 'SPI', 'TPI', 'TRI', 'TWI']  # add all your continuous variables
@@ -13,6 +15,5 @@ nonLandslides[columns_to_scale] = scaler.transform(nonLandslides[columns_to_scal
 landslides = pd.get_dummies(landslides, columns=['lithology', 'soil'])
 nonLandslides = pd.get_dummies(nonLandslides, columns=['lithology', 'soil'])
 
-landslides.to_csv("output_landslides.csv", index=False)
-nonLandslides.to_csv("output_non_landslides.csv", index=False)
-
+landslides.to_csv(PROCESSED_DATA_DIR / "output_landslides.csv", index=False)
+nonLandslides.to_csv(PROCESSED_DATA_DIR / "output_non_landslides.csv", index=False)

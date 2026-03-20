@@ -1,307 +1,250 @@
-import rasterio
-import numpy as np
-import glob
-import pandas as pd
-from sklearn.preprocessing import MinMaxScaler
-import torch
 import gc
-
-# Memory management settings
-CHUNK_SIZE = 50000  # Process this many pixels at a time to avoid memory crashes
-
-print("Loading raster files...")
-# Define the expected raster order to match training data
-expected_raster_names = [
-    'aspect_utm15_aligned.tif',
-    'elv_aligned.tif', 
-    'flow_acc_aligned.tif',
-    'planCurv_aligned.tif',
-    'profCurv_aligned.tif',
-    'riversprox_aligned.tif',
-    'roadsprox_aligned.tif',
-    'slope_aligned.tif',
-    'SPI_aligned.tif',
-    'TPI_aligned.tif',
-    'TRI_aligned.tif',
-    'TWI_aligned.tif',
-    'lithology_aligned.tif',
-    'soil_aligned.tif'
-]
-
-# Get all available raster files
-# Try multiple possible relative paths
+import glob
+import math
 import os
-possible_paths = [
-    "../../alignedRasters/*.tif",
-    "../alignedRasters/*.tif",
-    "../../OneDrive/geoProject/alignedRasters/*.tif",
-    "../../../OneDrive/geoProject/alignedRasters/*.tif"
+from contextlib import ExitStack
+
+import numpy as np
+import pandas as pd
+import rasterio
+import torch
+from rasterio.windows import Window
+from project_paths import (
+    SUSCEPTIBILITY_MAPS_DIR,
+    ensure_project_dirs,
+    resolve_processed_csvs,
+    resolve_processed_landslide_csv,
+)
+
+
+WINDOW_SIZE = 512
+EDGE_BUFFER = 50
+EXPECTED_RASTER_NAMES = [
+    "aspect_utm15_aligned.tif",
+    "elv_aligned.tif",
+    "flow_acc_aligned.tif",
+    "planCurv_aligned.tif",
+    "profCurv_aligned.tif",
+    "riversprox_aligned.tif",
+    "roadsprox_aligned.tif",
+    "slope_aligned.tif",
+    "SPI_aligned.tif",
+    "TPI_aligned.tif",
+    "TRI_aligned.tif",
+    "TWI_aligned.tif",
+    "lithology_aligned.tif",
+    "soil_aligned.tif",
 ]
+CONTINUOUS_COLUMNS = [
+    "aspect",
+    "elv",
+    "flowAcc",
+    "planCurv",
+    "profCurv",
+    "riverProx",
+    "roadProx",
+    "slope",
+    "SPI",
+    "TPI",
+    "TRI",
+    "TWI",
+]
+SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+ensure_project_dirs()
 
-available_rasters = []
-for path_pattern in possible_paths:
-    found = glob.glob(path_pattern)
-    if found:
-        available_rasters = found
-        print(f"  Found rasters at: {path_pattern}")
-        break
 
-if not available_rasters:
-    print("ERROR: Could not find aligned rasters in any expected location")
-    print("Searched paths:", possible_paths)
-    exit(1)
+def find_raster_paths():
+    print("Loading raster files...")
+    possible_paths = [
+        os.path.join(SCRIPT_DIR, "alignedRaster", "*.tif"),
+        os.path.join(SCRIPT_DIR, "alignedRasters", "*.tif"),
+        os.path.join(SCRIPT_DIR, "..", "alignedRaster", "*.tif"),
+        os.path.join(SCRIPT_DIR, "..", "alignedRasters", "*.tif"),
+        os.path.join(SCRIPT_DIR, "..", "..", "alignedRasters", "*.tif"),
+        os.path.join(SCRIPT_DIR, "..", "..", "OneDrive", "geoProject", "alignedRasters", "*.tif"),
+        os.path.join(SCRIPT_DIR, "..", "..", "..", "OneDrive", "geoProject", "alignedRasters", "*.tif"),
+    ]
 
-available_names = [f.split('/')[-1] for f in available_rasters]
+    available_rasters = []
+    for path_pattern in possible_paths:
+        found = glob.glob(path_pattern)
+        if found:
+            available_rasters = found
+            print(f"  Found rasters at: {path_pattern}")
+            break
 
-# Create ordered raster paths
-raster_paths = []
-for expected_name in expected_raster_names:
-    matching_rasters = [f for f in available_rasters if f.endswith(expected_name)]
-    if matching_rasters:
+    if not available_rasters:
+        raise FileNotFoundError(
+            f"Could not find aligned rasters. Searched: {possible_paths}"
+        )
+
+    raster_paths = []
+    for expected_name in EXPECTED_RASTER_NAMES:
+        matching_rasters = [path for path in available_rasters if path.endswith(expected_name)]
+        if not matching_rasters:
+            raise FileNotFoundError(f"Missing required raster: {expected_name}")
         raster_paths.append(matching_rasters[0])
         print(f"  Found: {expected_name}")
-    else:
-        print(f"  WARNING: Missing raster {expected_name}")
 
-print(f"Using {len(raster_paths)} raster files in correct order")
+    print(f"Using {len(raster_paths)} raster files in correct order")
+    return raster_paths
 
-# Read and stack - but be more memory efficient
-print("Reading raster data...")
-arrays = []
-nodata_values = []
-for i, path in enumerate(raster_paths):
-    print(f"  Reading {path.split('/')[-1]}...")
-    with rasterio.open(path) as src:
-        data = src.read(1).astype(np.float32)  # Convert to float for NaN handling
-        nodata_val = src.nodata
-        nodata_values.append(nodata_val)
-        print(f"    NoData value from metadata: {nodata_val}")
-        
-        # Replace NoData values with NaN for consistent handling
-        # Check both metadata value and common NoData markers
-        if nodata_val is not None:
-            data = np.where(data == nodata_val, np.nan, data)
-        
-        # Also check for common NoData value -99999 (or similar)
-        data = np.where(data <= -99999, np.nan, data)
-        data = np.where(data == -9999, np.nan, data)
-        
-        # Count NoData pixels
-        nodata_count = np.isnan(data).sum()
-        valid_count = (~np.isnan(data)).sum()
-        print(f"    Valid pixels: {valid_count:,} | NoData pixels: {nodata_count:,}")
-        
-        arrays.append(data)
 
-# Convert to 3D array: (bands, height, width)
-stacked = np.stack(arrays, axis=0)
-print("Shape of stacked raster:", stacked.shape)  # (bands, height, width)
-print(f"NoData values from rasters: {nodata_values}")
+def clean_raster_data(data, nodata_value):
+    clean = data.astype(np.float32, copy=False)
+    if nodata_value is not None and not np.isnan(nodata_value):
+        clean = np.where(clean == nodata_value, np.nan, clean)
+    clean = np.where(clean <= -99999, np.nan, clean)
+    clean = np.where(clean == -9999, np.nan, clean)
+    clean = np.where(np.abs(clean) > 1e10, np.nan, clean)
+    return clean
 
-# Get dimensions
-bands, height, width = stacked.shape
-total_pixels = height * width
 
-print(f"Total pixels to process: {total_pixels:,}")
-print(f"Processing in chunks of {CHUNK_SIZE:,} pixels to manage memory")
+def iter_windows(width, height, window_size):
+    for row_off in range(0, height, window_size):
+        for col_off in range(0, width, window_size):
+            yield Window(
+                col_off=col_off,
+                row_off=row_off,
+                width=min(window_size, width - col_off),
+                height=min(window_size, height - row_off),
+            )
 
-# Load training data to get the exact feature structure and encoding mappings
-print("Loading training data to understand feature structure...")
 
-# Try multiple possible paths for CSV files
-csv_paths = [
-    ("../output_landslides.csv", "../output_non_landslides.csv"),
-    ("output_landslides.csv", "output_non_landslides.csv"),
-    ("../../output_landslides.csv", "../../output_non_landslides.csv")
-]
+def resolve_training_csvs():
+    print("Loading training data to understand feature structure...")
+    landslides_path, non_landslides_path = resolve_processed_csvs()
+    print(f"  Found CSV files at: {landslides_path}")
+    landslides = pd.read_csv(landslides_path)
+    non_landslides = pd.read_csv(non_landslides_path)
+    return pd.concat([landslides, non_landslides], ignore_index=True)
 
-landslides = None
-nonLandslides = None
 
-for landslides_path, non_landslides_path in csv_paths:
-    if os.path.exists(landslides_path) and os.path.exists(non_landslides_path):
-        landslides = pd.read_csv(landslides_path)
-        nonLandslides = pd.read_csv(non_landslides_path)
-        print(f"  Found CSV files at: {landslides_path}")
-        break
+def resolve_landslide_csv_path():
+    return str(resolve_processed_landslide_csv())
 
-if landslides is None or nonLandslides is None:
-    print("ERROR: Could not find output_landslides.csv and output_non_landslides.csv")
-    print("Searched paths:", [path[0] for path in csv_paths])
-    exit(1)
 
-# Combine datasets
-combined = pd.concat([landslides, nonLandslides], ignore_index=True)
+def recover_training_minmax(landslides_df, raster_paths):
+    print("\nRecovering original MinMax scaling from landslide training points...")
+    coords = list(zip(landslides_df["xcoord"].to_numpy(), landslides_df["ycoord"].to_numpy()))
+    recovered_mins = []
+    recovered_maxs = []
 
-# Get all feature columns (excluding metadata)
-feature_cols = [col for col in combined.columns if col not in ['fid', 'xcoord', 'ycoord']]
-print(f"Expected feature columns ({len(feature_cols)}): {feature_cols}")
+    for column_name, raster_path in zip(CONTINUOUS_COLUMNS, raster_paths[: len(CONTINUOUS_COLUMNS)]):
+        with rasterio.open(raster_path) as src:
+            print(f"  Sampling {os.path.basename(raster_path)} for {column_name}...")
+            sampled = np.array([value[0] for value in src.sample(coords)], dtype=np.float32)
 
-# Get the exact order of columns used in training
-columns_to_scale = ['aspect', 'elv', 'flowAcc', 'planCurv', 'profCurv',
-                    'riverProx', 'roadProx', 'slope', 'SPI', 'TPI', 'TRI', 'TWI']
+        sampled = clean_raster_data(sampled, None)
+        normalized_values = pd.to_numeric(landslides_df[column_name], errors="coerce").to_numpy(dtype=np.float32)
+        valid_mask = ~np.isnan(sampled) & ~np.isnan(normalized_values)
 
-# Get one-hot encoded columns
-lithology_cols = [col for col in feature_cols if col.startswith('lithology_')]
-soil_cols = [col for col in feature_cols if col.startswith('soil_')]
+        if not valid_mask.any():
+            raise RuntimeError(
+                f"Could not recover scaler for {column_name}: no valid raster/training pairs"
+            )
 
-print(f"Lithology columns ({len(lithology_cols)}): {lithology_cols}")
-print(f"Soil columns ({len(soil_cols)}): {soil_cols}")
+        raw_values = sampled[valid_mask]
+        min_value = float(raw_values.min())
+        max_value = float(raw_values.max())
 
-# Verify raster order matches expected features
-columns_to_scale = ['aspect', 'elv', 'flowAcc', 'planCurv', 'profCurv',
-                    'riverProx', 'roadProx', 'slope', 'SPI', 'TPI', 'TRI', 'TWI']
+        if not np.isfinite(min_value) or not np.isfinite(max_value) or max_value <= min_value:
+            raise RuntimeError(
+                f"Could not recover scaler for {column_name}: invalid range {min_value}..{max_value}"
+            )
 
-expected_raster_order = columns_to_scale + ['lithology', 'soil']
-print(f"Expected feature order: {expected_raster_order}")
+        recovered_mins.append(min_value)
+        recovered_maxs.append(max_value)
+        print(f"    Recovered landslide-fit range: {min_value:.2f} to {max_value:.2f}")
 
-if len(raster_paths) != len(expected_raster_order):
-    print(f"ERROR: Found {len(raster_paths)} rasters but expected {len(expected_raster_order)}")
-    print("Cannot proceed with mismatched raster count")
-    exit(1)
+    return np.array(recovered_mins, dtype=np.float32), np.array(recovered_maxs, dtype=np.float32)
 
-# CRITICAL FIX: Fit scaler on RASTER min/max, not training sample min/max
-# The training data was already normalized, but we need to apply the SAME normalization
-# to new raster data. This requires knowing the original raster ranges.
-print("\nCalculating min/max from full rasters for proper scaling...")
-print("(This ensures consistent normalization between training and prediction)")
 
-raster_mins = []
-raster_maxs = []
+def apply_recovered_minmax(values, mins, maxs):
+    denom = np.where((maxs - mins) == 0, 1.0, (maxs - mins))
+    return (values - mins) / denom
 
-# Calculate min/max from each continuous raster
-for i, raster_path in enumerate(raster_paths[:len(columns_to_scale)]):
-    raster_name = raster_path.split('/')[-1]
-    print(f"  Scanning {raster_name}...")
-    
-    # We already loaded these arrays earlier
-    raster_data = arrays[i]
-    valid_data = raster_data[~np.isnan(raster_data)]
-    
-    if len(valid_data) > 0:
-        raster_min = valid_data.min()
-        raster_max = valid_data.max()
-        raster_mins.append(raster_min)
-        raster_maxs.append(raster_max)
-        print(f"    Range: {raster_min:.2f} to {raster_max:.2f}")
-    else:
-        print(f"    WARNING: No valid data found")
-        raster_mins.append(0)
-        raster_maxs.append(1)
 
-# Create MinMaxScaler with raster-based ranges (Step 1 of training pipeline)
-minmax_scaler = MinMaxScaler()
-# Manually set the scaler parameters based on actual raster ranges
-minmax_scaler.fit([raster_mins, raster_maxs])
-
-print(f"\nMinMaxScaler fitted on RASTER ranges (Step 1 of training pipeline)")
-print(f"This replicates the preprocessing step from normalise.py")
-
-# Get unique values for one-hot encoding mapping
-lithology_values = combined[lithology_cols].idxmax(axis=1).str.replace('lithology_', '').astype(int).unique()
-soil_values = combined[soil_cols].idxmax(axis=1).str.replace('soil_', '').astype(int).unique()
-
-print(f"\nUnique lithology values: {sorted(lithology_values)}")
-print(f"Unique soil values: {sorted(soil_values)}")
-
-# Load model
-print("Loading trained model...")
-try:
-    # Try multiple possible paths for the model file
-    # Determine the script directory to find model relative to script location
-    script_dir = os.path.dirname(os.path.abspath(__file__))
-    
+def load_model():
+    print("Loading trained model...")
     model_paths = [
-        os.path.join(script_dir, "models", "landslide_model_advanced_complete.pth"),  # models/ subdirectory relative to script
-        os.path.join(script_dir, "landslide_model_advanced_complete.pth"),  # Same dir as script
-        "landslide_model_advanced_complete.pth",  # Current working directory
-        "models/landslide_model_advanced_complete.pth",  # models subdirectory from cwd
-        "./models/landslide_model_advanced_complete.pth",  # Explicit current dir
-        "../models/landslide_model_advanced_complete.pth",  # Parent directory
-        "ANN-landslide-susceptibility/models/landslide_model_advanced_complete.pth"  # From parent
+        os.path.join(SCRIPT_DIR, "models", "landslide_model_advanced_complete.pth"),
+        os.path.join(SCRIPT_DIR, "landslide_model_advanced_complete.pth"),
+        os.path.join(os.getcwd(), "landslide_model_advanced_complete.pth"),
+        os.path.join(os.getcwd(), "models", "landslide_model_advanced_complete.pth"),
+        os.path.join(SCRIPT_DIR, "..", "models", "landslide_model_advanced_complete.pth"),
     ]
-    
-    model_file = None
-    for model_path in model_paths:
-        if os.path.exists(model_path):
-            model_file = model_path
-            print(f"  Found model at: {model_path}")
-            break
-    
+
+    model_file = next((path for path in model_paths if os.path.exists(path)), None)
     if model_file is None:
-        print("ERROR: Could not find landslide_model_advanced_complete.pth")
-        print("Searched paths:", model_paths)
-        exit(1)
-    
-    # Try loading with weights_only=False (PyTorch 2.6+ compatibility)
+        raise FileNotFoundError(
+            f"Could not find landslide_model_advanced_complete.pth. Searched: {model_paths}"
+        )
+
+    print(f"  Found model at: {model_file}")
     model_data = torch.load(model_file, weights_only=False)
-    
-    # Check if it's a dictionary containing the model
+
+    robust_scaler = None
+    selected_features = None
+    best_threshold = 0.5
+    input_dim = None
+
     if isinstance(model_data, dict):
-        if 'model' in model_data:
-            model = model_data['model']
-        elif 'model_state_dict' in model_data:
-            # Recreate the model architecture using saved info
-            print("Recreating model from state dict...")
-            
-            # Get model architecture info
-            input_dim = model_data['input_dim']
-            print(f"Model input dimension: {input_dim}")
-            
-            # Recreate the model architecture (using the exact architecture from training)
+        if "model" in model_data:
+            model = model_data["model"]
+            input_dim = getattr(getattr(model, "input_layer", None), "in_features", None)
+        elif "model_state_dict" in model_data:
             import torch.nn as nn
-            import torch.nn.functional as F
-            
+
+            print("Recreating model from state dict...")
+            input_dim = model_data["input_dim"]
+            print(f"Model input dimension: {input_dim}")
+            model_architecture = model_data.get("model_architecture", "AdvancedLandslideANN")
+
             class AttentionLayer(nn.Module):
                 def __init__(self, input_dim):
-                    super(AttentionLayer, self).__init__()
+                    super().__init__()
                     self.attention = nn.Sequential(
                         nn.Linear(input_dim, input_dim // 2),
                         nn.ReLU(),
                         nn.Linear(input_dim // 2, input_dim),
-                        nn.Softmax(dim=1)
+                        nn.Softmax(dim=1),
                     )
-                
+
                 def forward(self, x):
                     attention_weights = self.attention(x)
                     return x * attention_weights
 
             class ResidualBlock(nn.Module):
                 def __init__(self, input_dim, hidden_dim, dropout_rate=0.2):
-                    super(ResidualBlock, self).__init__()
+                    super().__init__()
                     self.fc1 = nn.Linear(input_dim, hidden_dim)
                     self.bn1 = nn.BatchNorm1d(hidden_dim)
                     self.fc2 = nn.Linear(hidden_dim, input_dim)
                     self.bn2 = nn.BatchNorm1d(input_dim)
                     self.dropout = nn.Dropout(dropout_rate)
                     self.relu = nn.ReLU()
-                    
+
                 def forward(self, x):
                     residual = x
                     out = self.relu(self.bn1(self.fc1(x)))
                     out = self.dropout(out)
                     out = self.bn2(self.fc2(out))
-                    out += residual  # Residual connection
+                    out += residual
                     return self.relu(out)
 
             class AdvancedLandslideANN(nn.Module):
                 def __init__(self, input_dim):
-                    super(AdvancedLandslideANN, self).__init__()
+                    super().__init__()
                     self.input_layer = nn.Sequential(
                         nn.Linear(input_dim, 512),
                         nn.BatchNorm1d(512),
                         nn.ReLU(),
-                        nn.Dropout(0.4)
+                        nn.Dropout(0.4),
                     )
-                    
-                    # Attention mechanism
                     self.attention = AttentionLayer(512)
-                    
-                    # Residual blocks
                     self.res_block1 = ResidualBlock(512, 256, 0.3)
                     self.res_block2 = ResidualBlock(512, 256, 0.3)
-                    
-                    # Feature extraction layers
                     self.feature_layers = nn.Sequential(
                         nn.Linear(512, 256),
                         nn.BatchNorm1d(256),
@@ -314,12 +257,10 @@ try:
                         nn.Linear(128, 64),
                         nn.BatchNorm1d(64),
                         nn.ReLU(),
-                        nn.Dropout(0.1)
+                        nn.Dropout(0.1),
                     )
-                    
-                    # Output layer
                     self.output = nn.Linear(64, 1)
-                    
+
                 def forward(self, x):
                     x = self.input_layer(x)
                     x = self.attention(x)
@@ -327,313 +268,256 @@ try:
                     x = self.res_block2(x)
                     x = self.feature_layers(x)
                     return self.output(x)
-            
-            # Create model and load state dict
-            model = AdvancedLandslideANN(input_dim)
-            model.load_state_dict(model_data['model_state_dict'])
-            
-            # Load the saved RobustScaler - this is Step 2 of the training pipeline
-            # This scaler was fitted on MinMax-scaled training data
-            if 'scaler' in model_data:
-                robust_scaler = model_data['scaler']
-                print("✓ Loaded RobustScaler from training (Step 2 of pipeline)")
+
+            class ImprovedLandslideANN(nn.Module):
+                def __init__(self, input_dim):
+                    super().__init__()
+                    self.network = nn.Sequential(
+                        nn.Linear(input_dim, 128),
+                        nn.BatchNorm1d(128),
+                        nn.ReLU(),
+                        nn.Dropout(0.30),
+                        nn.Linear(128, 64),
+                        nn.BatchNorm1d(64),
+                        nn.ReLU(),
+                        nn.Dropout(0.20),
+                        nn.Linear(64, 32),
+                        nn.ReLU(),
+                        nn.Dropout(0.10),
+                        nn.Linear(32, 1),
+                    )
+
+                def forward(self, x):
+                    return self.network(x)
+
+            if model_architecture == "ImprovedLandslideANN":
+                model = ImprovedLandslideANN(input_dim)
             else:
-                print("WARNING: No scaler found in model file. This will cause prediction errors!")
-                robust_scaler = None
-            
-            # Also load the saved threshold if available
-            best_threshold = model_data.get('best_threshold', 0.5)
-            print(f"Using threshold: {best_threshold}")
-            
-            # Get selected features if available (important for feature matching)
-            if 'selected_features' in model_data:
-                selected_features = model_data['selected_features']
-                print(f"Model was trained on {len(selected_features)} selected features")
-                print(f"First few selected features: {selected_features[:10]}")
-            else:
-                selected_features = None
+                model = AdvancedLandslideANN(input_dim)
+            model.load_state_dict(model_data["model_state_dict"])
+            robust_scaler = model_data.get("scaler")
+            best_threshold = model_data.get("best_threshold", 0.5)
+            selected_features = model_data.get("selected_features")
         else:
-            print("Model file structure not recognized. Available keys:", list(model_data.keys()))
-            exit(1)
+            raise ValueError(
+                f"Model file structure not recognized. Keys: {list(model_data.keys())}"
+            )
     else:
         model = model_data
-        
-except Exception as e:
-    print(f"Error loading model: {e}")
-    exit(1)
 
-model.eval()
-print("Model loaded successfully!")
-print(f"Expected input features: {input_dim}")
+    model.eval()
+    return model, robust_scaler, selected_features, best_threshold, input_dim
 
-# Validate scaling pipeline consistency
-if robust_scaler is not None:
-    print("\n=== SCALING PIPELINE VALIDATION ===")
-    print("✓ Training pipeline: Raw → MinMaxScaler → RobustScaler")
-    print("✓ Prediction pipeline: Raw → MinMaxScaler → RobustScaler")
-    print("✓ Same RobustScaler loaded from training")
-    print("✓ Pipeline consistency: VALIDATED")
-else:
-    print("\n⚠️  SCALING PIPELINE WARNING ⚠️")
-    print("❌ Missing RobustScaler - predictions will be UNRELIABLE!")
-    print("❌ Training used: Raw → MinMaxScaler → RobustScaler")
-    print("❌ Prediction using: Raw → MinMaxScaler only")
-    print("❌ This WILL cause wrong predictions!")
 
-# Create output array for predictions
-print("Initializing output arrays...")
-full_prediction = np.full((height, width), np.nan, dtype=np.float32)
-
-# Process data in chunks to avoid memory issues
-print("Starting prediction in chunks...")
-for chunk_start in range(0, total_pixels, CHUNK_SIZE):
-    chunk_end = min(chunk_start + CHUNK_SIZE, total_pixels)
-    chunk_size = chunk_end - chunk_start
-    
-    print(f"Processing chunk {chunk_start//CHUNK_SIZE + 1}/{(total_pixels-1)//CHUNK_SIZE + 1}: pixels {chunk_start:,} to {chunk_end-1:,}")
-    
-    # Extract chunk from stacked rasters
-    chunk_data = stacked.reshape(bands, -1)[:, chunk_start:chunk_end].T  # Shape: (chunk_size, bands)
-    
-    # Check for valid pixels (no NaN values in any band)
-    valid_mask_chunk = ~np.isnan(chunk_data).any(axis=1)
-    
-    # Additional check: ensure no suspicious values that might be NoData markers
-    # Common NoData values: -9999, -3.4e38, 0 (in some cases)
-    suspicious_mask = (
-        (np.abs(chunk_data) > 1e10).any(axis=1) |  # Extremely large values
-        ((chunk_data == 0).all(axis=1))  # All zeros across all bands (likely NoData)
+def apply_edge_correction(scores, rows, cols, width, height):
+    near_edge_mask = (
+        (cols < EDGE_BUFFER)
+        | (cols >= width - EDGE_BUFFER)
+        | (rows < EDGE_BUFFER)
+        | (rows >= height - EDGE_BUFFER)
     )
-    valid_mask_chunk = valid_mask_chunk & ~suspicious_mask
-    
-    if not valid_mask_chunk.any():
-        print("  No valid pixels in this chunk, skipping...")
-        continue
-    
-    # Get valid data for this chunk
-    valid_chunk_data = chunk_data[valid_mask_chunk]
-    print(f"  Valid pixels in chunk: {valid_mask_chunk.sum():,}/{chunk_size:,}")
-    
-    # Check for edge artifacts - identify if we're processing edge pixels
-    chunk_positions_all = np.arange(chunk_start, chunk_end)
-    chunk_rows_all = chunk_positions_all // width
-    chunk_cols_all = chunk_positions_all % width
-    
-    # Identify edge pixels (within 50 pixels of border)
-    edge_buffer = 50
-    is_edge_chunk = (
-        (chunk_cols_all < edge_buffer).any() or 
-        (chunk_cols_all >= width - edge_buffer).any() or
-        (chunk_rows_all < edge_buffer).any() or 
-        (chunk_rows_all >= height - edge_buffer).any()
+
+    if not near_edge_mask.any():
+        return scores
+
+    adjusted_scores = scores.copy()
+    edge_scores = np.minimum(adjusted_scores[near_edge_mask], 0.7)
+    edge_rows = rows[near_edge_mask]
+    edge_cols = cols[near_edge_mask]
+    distances = np.minimum.reduce(
+        [edge_cols, edge_rows, width - 1 - edge_cols, height - 1 - edge_rows]
     )
-    
-    if is_edge_chunk:
-        print(f"    Note: Processing edge region (within {edge_buffer} pixels of border)")
-    
-    # Separate continuous and categorical data
-    continuous_data = valid_chunk_data[:, :len(columns_to_scale)]  # First 12 columns
-    lithology_raw = valid_chunk_data[:, len(columns_to_scale)]    # 13th column (lithology)
-    soil_raw = valid_chunk_data[:, len(columns_to_scale)+1]       # 14th column (soil)
-    
-    # Create DataFrame for this chunk
-    chunk_df = pd.DataFrame(continuous_data, columns=columns_to_scale)
-    
-    # Apply the SAME scaling pipeline as training:
-    # Step 1: MinMaxScaler (replicates normalise.py preprocessing)
-    continuous_minmax = minmax_scaler.transform(chunk_df)
-    
-    # Step 2: RobustScaler (replicates modelTraining.py scaling)
-    if robust_scaler is not None:
-        continuous_scaled = robust_scaler.transform(continuous_minmax)
-        if chunk_start == 0:  # Only print once
-            print(f"  ✓ Applied 2-step scaling: MinMax → RobustScaler (matches training)")
-    else:
-        print("  ❌ ERROR: No RobustScaler available! Using only MinMaxScaler (will cause wrong predictions)")
-        continuous_scaled = continuous_minmax
-    
-    # One-hot encode lithology
-    lithology_encoded = np.zeros((len(valid_chunk_data), len(lithology_cols)))
-    for i, val in enumerate(lithology_raw):
-        if not np.isnan(val):
-            val_int = int(val)
-            col_name = f'lithology_{val_int}'
-            if col_name in lithology_cols:
-                col_idx = lithology_cols.index(col_name)
-                lithology_encoded[i, col_idx] = 1
-    
-    # One-hot encode soil
-    soil_encoded = np.zeros((len(valid_chunk_data), len(soil_cols)))
-    for i, val in enumerate(soil_raw):
-        if not np.isnan(val):
-            val_int = int(val)
-            col_name = f'soil_{val_int}'
-            if col_name in soil_cols:
-                col_idx = soil_cols.index(col_name)
-                soil_encoded[i, col_idx] = 1
-    
-    # Combine all features
-    chunk_features = np.concatenate([continuous_scaled, lithology_encoded, soil_encoded], axis=1)
-    
-    # Apply feature selection if it was used during training
-    if selected_features is not None:
-        # Create feature names for current chunk
-        feature_names = columns_to_scale + lithology_cols + soil_cols
-        # Select only the features that were used during training
-        feature_indices = [i for i, name in enumerate(feature_names) if name in selected_features]
-        chunk_features = chunk_features[:, feature_indices]
-        print(f"  Applied feature selection: {chunk_features.shape[1]} features")
-    
-    # Convert to tensor and predict
-    chunk_tensor = torch.tensor(chunk_features, dtype=torch.float32)
-    
-    with torch.no_grad():
-        predictions = model(chunk_tensor)
-        # Apply sigmoid to get probabilities between 0 and 1 (susceptibility scores)
-        susceptibility_scores = torch.sigmoid(predictions).cpu().numpy().flatten()
-    
-    # Apply edge correction during prediction for pixels near borders
-    if is_edge_chunk:
-        # Get positions for valid pixels in this chunk
-        chunk_positions_valid = chunk_positions_all[valid_mask_chunk]
-        chunk_rows_valid = chunk_positions_valid // width
-        chunk_cols_valid = chunk_positions_valid % width
-        
-        # Identify which pixels are actually near edges
-        edge_buffer = 50
-        near_edge_mask = (
-            (chunk_cols_valid < edge_buffer) |
-            (chunk_cols_valid >= width - edge_buffer) |
-            (chunk_rows_valid < edge_buffer) |
-            (chunk_rows_valid >= height - edge_buffer)
+    dampening = 0.5 + 0.5 * (distances / EDGE_BUFFER)
+    adjusted_scores[near_edge_mask] = edge_scores * dampening
+    return adjusted_scores
+
+
+def main():
+    raster_paths = find_raster_paths()
+
+    with rasterio.open(raster_paths[0]) as src:
+        height = src.height
+        width = src.width
+        output_meta = src.meta.copy()
+
+    for raster_path in raster_paths[1:]:
+        with rasterio.open(raster_path) as src:
+            if src.height != height or src.width != width:
+                raise ValueError(
+                    f"Raster shape mismatch for {raster_path}: "
+                    f"expected {width}x{height}, got {src.width}x{src.height}"
+                )
+
+    total_pixels = height * width
+    total_windows = math.ceil(height / WINDOW_SIZE) * math.ceil(width / WINDOW_SIZE)
+    print(f"Total pixels to process: {total_pixels:,}")
+    print(f"Processing in {total_windows:,} windows of up to {WINDOW_SIZE}x{WINDOW_SIZE}")
+
+    combined = resolve_training_csvs()
+    feature_cols = [col for col in combined.columns if col not in ["fid", "xcoord", "ycoord"]]
+    lithology_cols = [col for col in feature_cols if col.startswith("lithology_")]
+    soil_cols = [col for col in feature_cols if col.startswith("soil_")]
+
+    print(f"Expected feature columns ({len(feature_cols)} total)")
+    print(f"Lithology columns ({len(lithology_cols)}): {lithology_cols}")
+    print(f"Soil columns ({len(soil_cols)}): {soil_cols}")
+
+    expected_raster_order = CONTINUOUS_COLUMNS + ["lithology", "soil"]
+    if len(raster_paths) != len(expected_raster_order):
+        raise ValueError(
+            f"Found {len(raster_paths)} rasters but expected {len(expected_raster_order)}"
         )
-        
-        if near_edge_mask.any():
-            # Apply conservative smoothing to edge predictions
-            edge_susceptibility = susceptibility_scores[near_edge_mask]
-            
-            # Cap extreme values at edges (reduce high predictions near borders)
-            edge_cap = 0.7  # Maximum allowed susceptibility at edges
-            edge_susceptibility = np.minimum(edge_susceptibility, edge_cap)
-            
-            # Apply distance-based dampening for pixels very close to edge
-            for idx in np.where(near_edge_mask)[0]:
-                row, col = chunk_rows_valid[idx], chunk_cols_valid[idx]
-                dist_to_edge = min(col, row, width-1-col, height-1-row)
-                
-                if dist_to_edge < edge_buffer:
-                    # Apply dampening factor based on distance to edge
-                    dampen_factor = 0.5 + 0.5 * (dist_to_edge / edge_buffer)
-                    edge_susceptibility[np.where(near_edge_mask)[0] == idx] *= dampen_factor
-            
-            susceptibility_scores[near_edge_mask] = edge_susceptibility
-            print(f"    Applied edge correction to {near_edge_mask.sum()} border pixels")
-    
-    # Map predictions back to full raster positions
-    chunk_positions = np.arange(chunk_start, chunk_end)[valid_mask_chunk]
-    chunk_rows = chunk_positions // width
-    chunk_cols = chunk_positions % width
-    
-    full_prediction[chunk_rows, chunk_cols] = susceptibility_scores
-    
-    # Clear memory
-    del chunk_data, valid_chunk_data, chunk_df, continuous_scaled
-    del lithology_encoded, soil_encoded, chunk_features, chunk_tensor
-    del predictions, susceptibility_scores
-    gc.collect()
-    
-    print(f"  Chunk completed. Memory cleared.")
 
-print("Prediction completed!")
+    landslide_csv_path = resolve_landslide_csv_path()
+    landslides_only = pd.read_csv(landslide_csv_path)
+    raster_mins, raster_maxs = recover_training_minmax(landslides_only, raster_paths)
 
-# Analyze edge effects and data distribution
-print("Analyzing prediction distribution and edge effects...")
-valid_predictions = full_prediction[~np.isnan(full_prediction)]
-print(f"  Valid prediction statistics:")
-print(f"    Min: {np.min(valid_predictions):.4f}")
-print(f"    Max: {np.max(valid_predictions):.4f}")
-print(f"    Mean: {np.mean(valid_predictions):.4f}")
-print(f"    Median: {np.median(valid_predictions):.4f}")
-print(f"    Std: {np.std(valid_predictions):.4f}")
-
-# Check for edge artifacts by examining border regions
-print("  Checking edge regions for artifacts...")
-left_edge = full_prediction[:, :100]  # First 100 columns
-right_edge = full_prediction[:, -100:]  # Last 100 columns
-top_edge = full_prediction[:100, :]  # First 100 rows  
-bottom_edge = full_prediction[-100:, :]  # Last 100 rows
-
-def edge_stats(edge_data, edge_name):
-    valid_edge = edge_data[~np.isnan(edge_data)]
-    if len(valid_edge) > 0:
-        print(f"    {edge_name}: mean={np.mean(valid_edge):.4f}, max={np.max(valid_edge):.4f}, high-risk%={((valid_edge >= best_threshold).sum()/len(valid_edge)*100):.1f}%")
+    model, robust_scaler, selected_features, best_threshold, input_dim = load_model()
+    if robust_scaler is not None:
+        print("Loaded RobustScaler from training")
     else:
-        print(f"    {edge_name}: No valid data")
+        print("WARNING: No RobustScaler found in model file")
 
-edge_stats(left_edge, "Left edge  ")
-edge_stats(right_edge, "Right edge ")
-edge_stats(top_edge, "Top edge   ")
-edge_stats(bottom_edge, "Bottom edge")
+    feature_names = CONTINUOUS_COLUMNS + lithology_cols + soil_cols
+    feature_name_to_index = {name: index for index, name in enumerate(feature_names)}
+    if selected_features is not None:
+        feature_indices = [
+            feature_name_to_index[name]
+            for name in selected_features
+            if name in feature_name_to_index
+        ]
+    else:
+        feature_indices = list(range(len(feature_names)))
+    selected_feature_names = [feature_names[i] for i in feature_indices]
 
-# Check for abrupt transitions (high gradient areas)
-print("  Checking for abrupt transitions...")
-# Calculate gradients to find sudden changes
-from scipy import ndimage
-grad_x = ndimage.sobel(full_prediction, axis=1)  # Horizontal gradient
-grad_y = ndimage.sobel(full_prediction, axis=0)  # Vertical gradient
-gradient_magnitude = np.sqrt(grad_x**2 + grad_y**2)
+    expected_input_dim = input_dim if input_dim is not None else len(feature_indices)
+    if len(feature_indices) != expected_input_dim:
+        raise ValueError(
+            f"Feature count mismatch: model expects {expected_input_dim}, "
+            f"but prediction pipeline produced {len(feature_indices)} features"
+        )
 
-# Find areas with very high gradients (abrupt changes)
-high_gradient_threshold = np.nanpercentile(gradient_magnitude, 99)  # Top 1% of gradients
-high_gradient_mask = gradient_magnitude > high_gradient_threshold
+    lithology_index = {name: index for index, name in enumerate(lithology_cols)}
+    soil_index = {name: index for index, name in enumerate(soil_cols)}
 
-print(f"    High gradient threshold: {high_gradient_threshold:.4f}")
-print(f"    Pixels with abrupt transitions: {np.sum(high_gradient_mask):,}")
+    output_meta.update(count=1, dtype="float32", nodata=np.nan)
+    output_path = str(SUSCEPTIBILITY_MAPS_DIR / "susceptibility_map.tif")
 
-# Save gradient magnitude for inspection
-with rasterio.open(raster_paths[0]) as src:
-    meta_grad = src.meta.copy()
+    print("\nStarting streamed prediction...")
+    valid_prediction_count = 0
+    high_risk_count = 0
+    low_risk_count = 0
+    running_sum = 0.0
+    prediction_min = np.inf
+    prediction_max = -np.inf
 
-meta_grad.update({
-    "count": 1,
-    "dtype": 'float32'
-})
+    with ExitStack() as stack:
+        raster_sources = [stack.enter_context(rasterio.open(path)) for path in raster_paths]
+        output_dst = stack.enter_context(rasterio.open(output_path, "w", **output_meta))
 
-with rasterio.open("gradient_magnitude.tif", "w", **meta_grad) as dst:
-    dst.write(gradient_magnitude.astype(np.float32), 1)
+        for window_index, window in enumerate(iter_windows(width, height, WINDOW_SIZE), start=1):
+            if window_index == 1 or window_index % 25 == 0 or window_index == total_windows:
+                print(f"  Window {window_index:,}/{total_windows:,}")
 
-print("    Gradient magnitude saved as 'gradient_magnitude.tif'")
+            window_arrays = [
+                clean_raster_data(src.read(1, window=window), src.nodata) for src in raster_sources
+            ]
+            window_stack = np.stack(window_arrays, axis=-1)
+            pixel_matrix = window_stack.reshape(-1, len(raster_paths))
 
-# Also save a masked version showing only valid predictions for easier inspection
-masked_prediction = full_prediction.copy()
-masked_prediction[np.isnan(full_prediction)] = -1  # Set NoData to -1 for visualization
+            valid_mask = ~np.isnan(pixel_matrix).any(axis=1)
+            valid_mask &= ~(pixel_matrix == 0).all(axis=1)
 
-with rasterio.open("susceptibility_map_masked.tif", "w", **meta_grad) as dst:
-    dst.write(masked_prediction, 1)
+            prediction_window = np.full(
+                (int(window.height), int(window.width)),
+                np.nan,
+                dtype=np.float32,
+            )
 
-print("    Masked susceptibility map saved as 'susceptibility_map_masked.tif'")
+            if valid_mask.any():
+                valid_pixels = pixel_matrix[valid_mask]
+                continuous_scaled = apply_recovered_minmax(
+                    valid_pixels[:, : len(CONTINUOUS_COLUMNS)],
+                    raster_mins,
+                    raster_maxs,
+                )
 
-# Save the susceptibility map
-print("Saving susceptibility map...")
-# Get metadata from first raster
-with rasterio.open(raster_paths[0]) as src:
-    meta = src.meta.copy()
+                lithology_raw = valid_pixels[:, len(CONTINUOUS_COLUMNS)]
+                soil_raw = valid_pixels[:, len(CONTINUOUS_COLUMNS) + 1]
 
-meta.update({
-    "count": 1,
-    "dtype": 'float32'
-})
+                lithology_encoded = np.zeros((len(valid_pixels), len(lithology_cols)), dtype=np.float32)
+                soil_encoded = np.zeros((len(valid_pixels), len(soil_cols)), dtype=np.float32)
 
-# Save the susceptibility map
-with rasterio.open("susceptibility_map.tif", "w", **meta) as dst:
-    dst.write(full_prediction, 1)
+                for row_index, value in enumerate(lithology_raw):
+                    if not np.isnan(value):
+                        col_name = f"lithology_{int(value)}"
+                        if col_name in lithology_index:
+                            lithology_encoded[row_index, lithology_index[col_name]] = 1.0
 
-print("Susceptibility map saved as 'susceptibility_map.tif'")
-print(f"Prediction statistics:")
-print(f"  Total pixels: {height * width:,}")
-print(f"  Valid predictions: {(~np.isnan(full_prediction)).sum():,}")
-print(f"  Susceptibility range: {np.nanmin(full_prediction):.3f} to {np.nanmax(full_prediction):.3f}")
-print(f"  Mean susceptibility: {np.nanmean(full_prediction):.3f}")
-print(f"  High-risk pixels (>= {best_threshold:.3f}): {(full_prediction >= best_threshold).sum():,}")
-print(f"  Low-risk pixels (< {best_threshold:.3f}): {(full_prediction < best_threshold).sum():,}")
-print(f"  Percentage high-risk: {((full_prediction >= best_threshold).sum() / (~np.isnan(full_prediction)).sum() * 100):.2f}%")
+                for row_index, value in enumerate(soil_raw):
+                    if not np.isnan(value):
+                        col_name = f"soil_{int(value)}"
+                        if col_name in soil_index:
+                            soil_encoded[row_index, soil_index[col_name]] = 1.0
+
+                chunk_features = np.concatenate(
+                    [continuous_scaled, lithology_encoded, soil_encoded],
+                    axis=1,
+                )
+                chunk_features = chunk_features[:, feature_indices]
+                if robust_scaler is not None:
+                    chunk_features = robust_scaler.transform(
+                        pd.DataFrame(chunk_features, columns=selected_feature_names)
+                    )
+
+                chunk_tensor = torch.tensor(chunk_features, dtype=torch.float32)
+                with torch.no_grad():
+                    scores = torch.sigmoid(model(chunk_tensor)).cpu().numpy().flatten()
+
+                local_rows, local_cols = np.divmod(
+                    np.flatnonzero(valid_mask),
+                    int(window.width),
+                )
+                global_rows = local_rows + int(window.row_off)
+                global_cols = local_cols + int(window.col_off)
+                scores = apply_edge_correction(scores, global_rows, global_cols, width, height)
+
+                flat_prediction = prediction_window.reshape(-1)
+                flat_prediction[valid_mask] = scores.astype(np.float32)
+
+                valid_prediction_count += scores.size
+                high_risk_count += int((scores >= best_threshold).sum())
+                low_risk_count += int((scores < best_threshold).sum())
+                running_sum += float(scores.sum())
+                prediction_min = min(prediction_min, float(scores.min()))
+                prediction_max = max(prediction_max, float(scores.max()))
+
+                del valid_pixels, continuous_scaled
+                del lithology_encoded, soil_encoded, chunk_features, chunk_tensor, scores
+
+            output_dst.write(prediction_window, 1, window=window)
+
+            del window_arrays, window_stack, pixel_matrix, prediction_window
+            gc.collect()
+
+    if valid_prediction_count == 0:
+        raise RuntimeError("No valid predictions were produced. Check raster NoData values.")
+
+    mean_prediction = running_sum / valid_prediction_count
+    print("\nPrediction completed successfully")
+    print(f"Susceptibility map saved as: {output_path}")
+    print("Prediction statistics:")
+    print(f"  Total pixels: {total_pixels:,}")
+    print(f"  Valid predictions: {valid_prediction_count:,}")
+    print(f"  Susceptibility range: {prediction_min:.3f} to {prediction_max:.3f}")
+    print(f"  Mean susceptibility: {mean_prediction:.3f}")
+    print(f"  High-risk pixels (>= {best_threshold:.3f}): {high_risk_count:,}")
+    print(f"  Low-risk pixels (< {best_threshold:.3f}): {low_risk_count:,}")
+    print(
+        f"  Percentage high-risk: "
+        f"{(high_risk_count / valid_prediction_count * 100):.2f}%"
+    )
+
+
+if __name__ == "__main__":
+    main()

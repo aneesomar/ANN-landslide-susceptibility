@@ -18,8 +18,12 @@ from sklearn.metrics import (accuracy_score, precision_score, recall_score, f1_s
                              roc_curve, precision_recall_curve)
 import matplotlib.pyplot as plt
 import seaborn as sns
+from pathlib import Path
+from project_paths import TRANSFER_RESULTS_DIR, ensure_project_dirs, resolve_model_package
 import warnings
 warnings.filterwarnings('ignore')
+ensure_project_dirs()
+SCRIPT_DIR = Path(__file__).resolve().parent
 
 # Try to import geopandas, use alternative if not available
 try:
@@ -109,7 +113,7 @@ class AdvancedLandslideANN(nn.Module):
 # ======================== Load Trained Model ========================
 
 print("\n1. Loading Chiapas-trained model...")
-model_path = 'landslide_model_advanced_complete.pth'
+model_path = resolve_model_package()
 model_data = torch.load(model_path, map_location='cpu', weights_only=False)
 
 # Extract model components
@@ -160,7 +164,7 @@ print(f"   ✓ Mapped {len(durban_to_chiapas_mapping)} Durban rasters to Chiapas
 
 print("\n3. Loading Durban raster data...")
 
-durban_raster_dir = 'DurbanRasters/'
+durban_raster_dir = str(SCRIPT_DIR / 'DurbanRasters') + '/'
 raster_data = {}
 reference_raster = None
 
@@ -190,7 +194,7 @@ print(f"   CRS: {reference_crs}")
 
 print("\n4. Loading Durban landslide points...")
 
-landslide_points_path = 'DurbanRasters/clipped_landslidePoints_lo19.gpkg'
+landslide_points_path = str(SCRIPT_DIR / 'DurbanRasters' / 'clipped_landslidePoints_lo19.gpkg')
 
 if HAS_GEOPANDAS:
     try:
@@ -338,8 +342,9 @@ print(f"   ✓ Landslides: {(durban_data['label'] == 1).sum()} ({(durban_data['l
 print(f"   ✓ Non-landslides: {(durban_data['label'] == 0).sum()} ({(durban_data['label'] == 0).mean()*100:.1f}%)")
 
 # Save Durban data for reference
-durban_data.to_csv('durban_test_data.csv', index=False)
-print(f"   ✓ Saved Durban data to 'durban_test_data.csv'")
+durban_data_path = TRANSFER_RESULTS_DIR / 'durban_test_data.csv'
+durban_data.to_csv(durban_data_path, index=False)
+print(f"   ✓ Saved Durban data to '{durban_data_path}'")
 
 # ======================== Feature Engineering ========================
 
@@ -733,8 +738,9 @@ ax12.text(0.05, 0.95, summary_text, transform=ax12.transAxes,
 plt.suptitle('Transfer Learning Evaluation: Chiapas Model → Durban Data', 
             fontsize=16, fontweight='bold', y=0.995)
 plt.tight_layout(rect=[0, 0, 1, 0.99])
-plt.savefig('transfer_learning_durban_evaluation.png', dpi=300, bbox_inches='tight')
-print(f"   ✓ Saved: transfer_learning_durban_evaluation.png")
+evaluation_plot_path = TRANSFER_RESULTS_DIR / 'transfer_learning_durban_evaluation.png'
+plt.savefig(evaluation_plot_path, dpi=300, bbox_inches='tight')
+print(f"   ✓ Saved: {evaluation_plot_path}")
 plt.show()
 
 # ======================== Save Results to CSV ========================
@@ -756,16 +762,18 @@ results_df = pd.DataFrame({
 })
 
 results_df = results_df.sort_values('Threshold').reset_index(drop=True)
-results_df.to_csv('transfer_learning_metrics_durban.csv', index=False)
-print(f"   ✓ Saved: transfer_learning_metrics_durban.csv")
+metrics_output_path = TRANSFER_RESULTS_DIR / 'transfer_learning_metrics_durban.csv'
+results_df.to_csv(metrics_output_path, index=False)
+print(f"   ✓ Saved: {metrics_output_path}")
 
 # Save predictions
 predictions_df = durban_data[['xcoord', 'ycoord', 'label']].copy()
 predictions_df['probability'] = probabilities
 predictions_df['predicted_chiapas_threshold'] = (probabilities > best_threshold).astype(int)
 predictions_df['predicted_durban_threshold'] = (probabilities > best_f1_threshold).astype(int)
-predictions_df.to_csv('durban_predictions_transfer_learning.csv', index=False)
-print(f"   ✓ Saved: durban_predictions_transfer_learning.csv")
+predictions_output_path = TRANSFER_RESULTS_DIR / 'durban_predictions_transfer_learning.csv'
+predictions_df.to_csv(predictions_output_path, index=False)
+print(f"   ✓ Saved: {predictions_output_path}")
 
 # ======================== Final Summary ========================
 
@@ -802,10 +810,10 @@ else:
     print(f"   ✗ Training a Durban-specific model is recommended.")
 
 print(f"\n📁 OUTPUT FILES:")
-print(f"   • transfer_learning_durban_evaluation.png")
-print(f"   • transfer_learning_metrics_durban.csv")
-print(f"   • durban_predictions_transfer_learning.csv")
-print(f"   • durban_test_data.csv")
+print(f"   • {evaluation_plot_path}")
+print(f"   • {metrics_output_path}")
+print(f"   • {predictions_output_path}")
+print(f"   • {durban_data_path}")
 
 print(f"\n{'='*80}")
 print("✓ Transfer learning experiment completed successfully!")

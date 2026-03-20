@@ -1,0 +1,38 @@
+{
+  "model_path": "/home/anees/personal_projects/ANN-landslide-susceptibility/models/landslide_model_advanced_complete.pth",
+  "num_selected_features": 60,
+  "best_threshold": 0.53,
+  "validation_metrics": {
+    "accuracy": 0.6272474044061788,
+    "precision": 0.6672979797979798,
+    "recall": 0.527972027972028,
+    "f1": 0.5895147796988288,
+    "auroc": 0.6869899489313973,
+    "pr_auc": 0.6828910943876274,
+    "mcc": 0.26245828318004927,
+    "brier": 0.22391515970230103,
+    "threshold": 0.53
+  },
+  "test_default_metrics": {
+    "accuracy": 0.7024075452965997,
+    "precision": 0.6805682859761687,
+    "recall": 0.7473578258681429,
+    "f1": 0.712401055408971,
+    "auroc": 0.7737991607545027,
+    "pr_auc": 0.7429342922258607,
+    "mcc": 0.4073986735476772,
+    "brier": 0.201388418674469,
+    "threshold": 0.5
+  },
+  "test_optimized_metrics": {
+    "accuracy": 0.69421692727724,
+    "precision": 0.6952922917744438,
+    "recall": 0.6763965777554102,
+    "f1": 0.6857142857142857,
+    "auroc": 0.7737991607545027,
+    "pr_auc": 0.7429342922258607,
+    "mcc": 0.38823557629381156,
+    "brier": 0.201388418674469,
+    "threshold": 0.53
+  }
+}

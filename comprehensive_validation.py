@@ -18,8 +18,15 @@ from sklearn.metrics import (roc_curve, auc, confusion_matrix,
                              accuracy_score, precision_score, recall_score, f1_score)
 from scipy import stats
 from scipy.spatial import distance
+from project_paths import (
+    VALIDATION_RESULTS_DIR,
+    ensure_project_dirs,
+    resolve_processed_csvs,
+    resolve_susceptibility_map,
+)
 import warnings
 warnings.filterwarnings('ignore')
+ensure_project_dirs()
 
 print("="*80)
 print("COMPREHENSIVE VALIDATION ANALYSIS")
@@ -29,14 +36,16 @@ print("="*80)
 print("\n1. Loading data...")
 
 # Load susceptibility map
-with rasterio.open('susceptibility_map.tif') as src:
+susceptibility_map_path = resolve_susceptibility_map()
+with rasterio.open(susceptibility_map_path) as src:
     susceptibility = src.read(1)
     transform = src.transform
     print(f"   ✓ Susceptibility map loaded: {src.width} × {src.height} pixels")
 
 # Load landslide and non-landslide data
-landslides = pd.read_csv('../output_landslides.csv')
-non_landslides = pd.read_csv('../output_non_landslides.csv')
+landslide_csv, non_landslide_csv = resolve_processed_csvs()
+landslides = pd.read_csv(landslide_csv)
+non_landslides = pd.read_csv(non_landslide_csv)
 
 print(f"   ✓ Landslide points: {len(landslides)}")
 print(f"   ✓ Non-landslide points: {len(non_landslides)}")
@@ -320,8 +329,8 @@ for threshold in thresholds_to_test:
     print(f"   Threshold {threshold:.1f}: Acc={acc:.3f}, Prec={prec:.3f}, Rec={rec:.3f}, F1={f1:.3f}")
 
 df_confusion = pd.DataFrame(confusion_results)
-df_confusion.to_csv('validation_confusion_matrices.csv', index=False)
-print(f"   ✓ Saved confusion matrices to 'validation_confusion_matrices.csv'")
+df_confusion.to_csv(VALIDATION_RESULTS_DIR / 'validation_confusion_matrices.csv', index=False)
+print(f"   ✓ Saved confusion matrices to '{VALIDATION_RESULTS_DIR / 'validation_confusion_matrices.csv'}'")
 
 # ======================== 7. STATISTICAL COMPARISON ========================
 print("\n7. Statistical comparison of landslide vs non-landslide areas...")
@@ -461,8 +470,8 @@ ax7.legend()
 ax7.grid(True, alpha=0.3)
 ax7.set_ylim([0, 1])
 
-plt.savefig('comprehensive_validation_analysis.png', dpi=300, bbox_inches='tight')
-print(f"   ✓ Saved: comprehensive_validation_analysis.png")
+plt.savefig(VALIDATION_RESULTS_DIR / 'comprehensive_validation_analysis.png', dpi=300, bbox_inches='tight')
+print(f"   ✓ Saved: {VALIDATION_RESULTS_DIR / 'comprehensive_validation_analysis.png'}")
 
 # ======================== 9. SAVE VALIDATION SUMMARY ========================
 print("\n9. Saving validation summary...")
@@ -486,15 +495,15 @@ validation_summary = {
 }
 
 df_summary = pd.DataFrame([validation_summary])
-df_summary.to_csv('validation_summary.csv', index=False)
-print(f"   ✓ Saved: validation_summary.csv")
+df_summary.to_csv(VALIDATION_RESULTS_DIR / 'validation_summary.csv', index=False)
+print(f"   ✓ Saved: {VALIDATION_RESULTS_DIR / 'validation_summary.csv'}")
 
 # Save success rate data
 success_rate_data = pd.DataFrame({
     'Area_Percentage': area_percentages,
     'Landslide_Percentage': landslide_percentages
 })
-success_rate_data.to_csv('success_rate_curve_data.csv', index=False)
+success_rate_data.to_csv(VALIDATION_RESULTS_DIR / 'success_rate_curve_data.csv', index=False)
 print(f"   ✓ Saved: success_rate_curve_data.csv")
 
 print(f"\n{'='*80}")
@@ -510,8 +519,8 @@ print(f"  • Top 10% area captures: {landslide_percentages[10]:.1f}% of landsli
 print(f"  • Top 20% area captures: {landslide_percentages[20]:.1f}% of landslides")
 print(f"  • Cohen's d: {cohens_d:.3f} ({effect} effect)")
 print(f"\nGenerated files:")
-print(f"  1. comprehensive_validation_analysis.png - All validation plots")
-print(f"  2. validation_summary.csv - Summary statistics")
-print(f"  3. validation_confusion_matrices.csv - Performance at different thresholds")
+print(f"  1. {VALIDATION_RESULTS_DIR / 'comprehensive_validation_analysis.png'} - All validation plots")
+print(f"  2. {VALIDATION_RESULTS_DIR / 'validation_summary.csv'} - Summary statistics")
+print(f"  3. {VALIDATION_RESULTS_DIR / 'validation_confusion_matrices.csv'} - Performance at different thresholds")
 print(f"  4. success_rate_curve_data.csv - Success rate curve data")
 print(f"\n{'='*80}")
