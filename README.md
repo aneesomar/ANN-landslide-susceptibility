@@ -33,7 +33,7 @@ ANN-landslide-susceptibility/
 │       ├── non_landslides.csv
 │       ├── output_landslides.csv
 │       └── output_non_landslides.csv
-├── alignedRaster/
+├── alignedRaster/                  # or alignedRasters/
 │   ├── aspect_utm15_aligned.tif
 │   ├── elv_aligned.tif
 │   ├── ...
@@ -49,8 +49,8 @@ ANN-landslide-susceptibility/
 │   ├── transfer_learning/
 │   └── validation/
 ├── benchmark_spatial_models.py
+├── comprehensive_validation.py
 ├── modelTraining.py
-├── normalise.py
 ├── preprocessing.py
 ├── project_paths.py
 ├── train.py
@@ -70,7 +70,7 @@ These raw files should contain the unnormalized continuous predictors and intege
 
 ### Raster stack for map prediction
 
-Place the aligned rasters in `alignedRaster/` using these names:
+Place the aligned rasters in `alignedRaster/` using these names. The prediction script also checks `alignedRasters/` and several parent-folder fallback locations, but `alignedRaster/` in the project root is the clearest default.
 
 - `aspect_utm15_aligned.tif`
 - `elv_aligned.tif`
@@ -98,6 +98,12 @@ pip install pandas numpy scikit-learn torch matplotlib seaborn rasterio scipy
 ```
 
 If you already use Conda or another environment manager, that is also fine as long as the packages above are available.
+
+For the optional Durban transfer-learning workflow, you may also need:
+
+```bash
+pip install geopandas fiona
+```
 
 ## How To Run
 
@@ -157,6 +163,14 @@ python transfer_learning_durban.py
 
 This evaluates the trained Chiapas model on the Durban dataset and writes outputs to `results/transfer_learning/`.
 
+### 5. Optional susceptibility map validation
+
+```bash
+python comprehensive_validation.py
+```
+
+This validates the generated susceptibility map against known landslide and non-landslide locations and writes outputs to `results/validation/`.
+
 ## Detailed Pipeline
 
 ## 1. Raw Data Ingestion
@@ -182,7 +196,7 @@ The helper function in both training and benchmarking:
 - assigns each point to one of 25 spatial blocks
 - removes very small blocks using `MIN_BLOCK_SIZE`
 
-In the current dataset, 25 blocks were requested but only 19 were populated strongly enough for modelling after filtering.
+The exact number of populated blocks retained for modelling depends on the current dataset after `MIN_BLOCK_SIZE` filtering.
 
 ## 3. Leakage-Safe Preprocessing
 
@@ -353,4 +367,9 @@ Optional:
 python transfer_learning_durban.py
 ```
 
+Optional after map generation:
+
+```bash
+python comprehensive_validation.py
+```
 
