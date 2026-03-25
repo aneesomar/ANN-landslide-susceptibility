@@ -1,13 +1,11 @@
 # Landslide Susceptibility Modelling
 
-This repository contains a leakage-aware landslide susceptibility modelling workflow built around:
+This repository contains a landslide susceptibility modelling workflow built around:
 
 - an artificial neural network (ANN)
 - benchmark comparisons with Random Forest (RF) and Gradient Boosting (GB)
 - spatially explicit evaluation using 5-fold block cross-validation
 - raster-based susceptibility map generation from trained model outputs
-
-The current code is designed for academic comparison of models under the same sampling setup, predictor family, and spatial validation logic.
 
 ## Overview
 
